@@ -142,7 +142,7 @@ bool    screenDirty = true;   // force a full redraw of the current screen
 volatile bool tpPending = false;
 void IRAM_ATTR onTouchISR() { tpPending = true; }
 
-struct Gesture {
+struct TouchTrack {
   bool  down       = false;   // finger currently on glass
   int   downX, downY;         // where it first touched
   int   curX,  curY;          // latest position
@@ -153,7 +153,7 @@ struct Gesture {
 } g;
 
 enum EvType { EV_NONE, EV_DOWN, EV_TAP, EV_SWIPE_L, EV_SWIPE_R, EV_SWIPE_U, EV_SWIPE_D, EV_HOLD };
-struct Event { EvType type = EV_NONE; int x = 0, y = 0; };
+struct UiEvent { EvType type = EV_NONE; int x = 0, y = 0; };
 
 #define SWIPE_THRESH 60     // px of drag before a swipe fires (mid-drag)
 #define TAP_SLOP     18     // movement under this on release = a tap
@@ -185,8 +185,8 @@ bool readTouch(int &x, int &y) {
 
 // Produce at most one high-level event per call. Button actions use EV_DOWN;
 // swipes fire mid-drag; long-press fires EV_HOLD; a short lift is EV_TAP.
-Event pollGesture() {
-  Event ev;
+UiEvent pollGesture() {
+  UiEvent ev;
   uint32_t now = millis();
   bool due = tpPending || g.down || (now - lastPollMs >= TP_HEARTBEAT);
   if (!due) return ev;
@@ -425,7 +425,7 @@ void drawHomeDynamic() {
   // (clean/fun live on the STATS screen to keep home uncluttered)
 }
 
-void handleHome(const Event &ev) {
+void handleHome(const UiEvent &ev) {
   Btn *all[] = {&homeBtns[0], &homeBtns[1], &homeBtns2[0], &homeBtns2[1]};
   if (ev.type == EV_DOWN) {
     // avatar tap zone -> pet him (fun up)
@@ -475,7 +475,7 @@ void drawCare() {
   textC(buf, LCD_W/2, 360, 2, C_CYAN);
   textC("swipe down: back", LCD_W/2, 400, 1, C_GREY);
 }
-void handleCare(const Event &ev){
+void handleCare(const UiEvent &ev){
   if (ev.type==EV_SWIPE_D){ screen=SCR_HOME; screenDirty=true; return; }
   if (ev.type!=EV_DOWN) return;
   for (int i=0;i<3;i++){ Btn&b=careBtns[i];
@@ -513,7 +513,7 @@ void drawShop(){
   }
   textC("swipe down: back", LCD_W/2, 404, 1, C_GREY);
 }
-void handleShop(const Event &ev){
+void handleShop(const UiEvent &ev){
   if (ev.type==EV_SWIPE_D){ screen=SCR_HOME; screenDirty=true; return; }
   if (ev.type!=EV_DOWN) return;
   int y=120;
@@ -543,7 +543,7 @@ void drawStats(){
   textC(buf,LCD_W/2,340,2,C_CYAN);
   textC("swipe right: back", LCD_W/2, 404, 1, C_GREY);
 }
-void handleStats(const Event &ev){
+void handleStats(const UiEvent &ev){
   if (ev.type==EV_SWIPE_R||ev.type==EV_SWIPE_L||ev.type==EV_SWIPE_D){ screen=SCR_HOME; screenDirty=true; }
 }
 
@@ -575,7 +575,7 @@ void drawAgentDynamic(){
   gfx->fillRoundRect(103,330,260*lvl/100,16,5,th.accent);
   gfx->drawRoundRect(103,330,260,16,5,C_DIMGREY);
 }
-void handleAgent(const Event &ev){
+void handleAgent(const UiEvent &ev){
   if (ev.type==EV_SWIPE_D){ screen=SCR_HOME; screenDirty=true; }
 }
 
@@ -597,7 +597,7 @@ void drawGames(){
   }
   textC("win studs!   swipe down: back", LCD_W/2, 330, 1, C_GREY);
 }
-void handleGames(const Event &ev){
+void handleGames(const UiEvent &ev){
   if (ev.type==EV_SWIPE_D){ screen=SCR_HOME; screenDirty=true; return; }
   if (ev.type!=EV_DOWN) return;
   for (int i=0;i<3;i++){ Btn&b=gameBtns[i];
@@ -614,8 +614,8 @@ void handleGames(const Event &ev){
 #define SN_ROWS 12
 #define SN_OX   101          // origin so the 264x264 board sits centered
 #define SN_OY   101
-struct P{int x,y;};
-P snake[SN_COLS*SN_ROWS]; int snLen; int snDir; P food; bool snDead; uint32_t snTick;
+struct GPt{int x,y;};
+GPt snake[SN_COLS*SN_ROWS]; int snLen; int snDir; GPt food; bool snDead; uint32_t snTick;
 void snPlaceFood(){ food.x=esp_random()%SN_COLS; food.y=esp_random()%SN_ROWS; }
 void snReset(){ snLen=3; snake[0]={6,6};snake[1]={5,6};snake[2]={4,6}; snDir=1; snDead=false; snPlaceFood(); snTick=millis(); }
 void snDrawCell(int cx,int cy,uint16_t col){ gfx->fillRoundRect(SN_OX+cx*SN_CELL+1,SN_OY+cy*SN_CELL+1,SN_CELL-2,SN_CELL-2,4,col); }
@@ -627,7 +627,7 @@ void drawSnakeStatic(){
 void stepSnake(){
   if (snDead) return;
   uint32_t now=millis(); if (now-snTick<220) return; snTick=now;
-  P nh=snake[0];
+  GPt nh=snake[0];
   if (snDir==0)nh.y--; else if(snDir==1)nh.x++; else if(snDir==2)nh.y++; else nh.x--;
   if (nh.x<0||nh.x>=SN_COLS||nh.y<0||nh.y>=SN_ROWS){ snDead=true; }
   for (int i=0;i<snLen&&!snDead;i++) if(snake[i].x==nh.x&&snake[i].y==nh.y) snDead=true;
@@ -649,7 +649,7 @@ void stepSnake(){
   gfx->fillRect(0,8,LCD_W,18,C_BLACK);
   char b[20]; snprintf(b,sizeof(b),"len %d",snLen); textC(b,LCD_W/2,16,2,C_CYAN);
 }
-void handleSnake(const Event &ev){
+void handleSnake(const UiEvent &ev){
   if (ev.type==EV_SWIPE_D && snDead){ screen=SCR_GAMES; screenDirty=true; return; }
   if (ev.type==EV_SWIPE_U && snDir!=2) snDir=0;
   else if (ev.type==EV_SWIPE_R && snDir!=3) snDir=1;
@@ -689,7 +689,7 @@ void stepMole(){
   gfx->fillRect(0,64,LCD_W,16,C_BLACK);
   char b[20]; snprintf(b,sizeof(b),"hits %d",moleScore); textC(b,LCD_W/2,72,1,C_CYAN);
 }
-void handleMole(const Event &ev){
+void handleMole(const UiEvent &ev){
   if (ev.type==EV_SWIPE_D && millis()-moleStart>30000){ screen=SCR_GAMES; screenDirty=true; return; }
   if (ev.type!=EV_DOWN) return;
   int dx=ev.x-MOLE_X[moleIdx], dy=ev.y-MOLE_Y[moleIdx];
@@ -743,7 +743,7 @@ void g2Move(int dir){
     saveState();
   }
 }
-void handle2048(const Event &ev){
+void handle2048(const UiEvent &ev){
   if(ev.type==EV_HOLD){ screen=SCR_GAMES; screenDirty=true; return; }
   if(ev.type==EV_SWIPE_U)g2Move(0);
   else if(ev.type==EV_SWIPE_R)g2Move(1);
@@ -845,7 +845,7 @@ void enterScreen(){
 void loop(){
   if(screenDirty){ screenDirty=false; enterScreen(); return; }
 
-  Event ev = pollGesture();
+  UiEvent ev = pollGesture();
 
   switch(screen){
     case SCR_HOME:  handleHome(ev);  break;
