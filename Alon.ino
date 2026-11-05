@@ -155,6 +155,21 @@ struct TouchTrack {
 enum EvType { EV_NONE, EV_DOWN, EV_TAP, EV_SWIPE_L, EV_SWIPE_R, EV_SWIPE_U, EV_SWIPE_D, EV_HOLD };
 struct UiEvent { EvType type = EV_NONE; int x = 0, y = 0; };
 
+// Explicit prototypes for every function that uses UiEvent in its
+// signature. This stops the Arduino IDE from auto-inserting its own
+// prototypes ABOVE this struct (which caused "'UiEvent' does not name a
+// type"). Keep these if you add more handlers.
+UiEvent pollGesture();
+void handleHome (const UiEvent &ev);
+void handleCare (const UiEvent &ev);
+void handleShop (const UiEvent &ev);
+void handleStats(const UiEvent &ev);
+void handleAgent(const UiEvent &ev);
+void handleGames(const UiEvent &ev);
+void handleSnake(const UiEvent &ev);
+void handleMole (const UiEvent &ev);
+void handle2048 (const UiEvent &ev);
+
 #define SWIPE_THRESH 60     // px of drag before a swipe fires (mid-drag)
 #define TAP_SLOP     18     // movement under this on release = a tap
 #define HOLD_MS      650    // long-press duration
