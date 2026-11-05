@@ -68,8 +68,8 @@
 #define IMU_ADDR    0x6B
 
 /* If taps land in the wrong place, flip these (then rebuild):          */
-#define TOUCH_FLIP_X 0
-#define TOUCH_FLIP_Y 0
+#define TOUCH_FLIP_X 1
+#define TOUCH_FLIP_Y 1
 #define TOUCH_SWAP_XY 0
 
 /* ----------------------- DISPLAY OBJECTS ---------------------------- */
@@ -174,13 +174,13 @@ void handleMole (const UiEvent &ev);
 void handle2048 (const UiEvent &ev);
 
 #ifndef TOUCH_DEBUG
-#define TOUCH_DEBUG 1       // 1 = show a live touch readout at the bottom
+#define TOUCH_DEBUG 0       // 1 = show a live touch readout at the bottom
 #endif
 
 // TOUCH_TEST: boot into a calibration screen instead of the pet. Tap the
 // rings and report the x,y it prints. Set back to 0 to run the pet.
 #ifndef TOUCH_TEST
-#define TOUCH_TEST 1
+#define TOUCH_TEST 0
 #endif
 
 #define SWIPE_THRESH 72     // px of drag before a swipe fires
