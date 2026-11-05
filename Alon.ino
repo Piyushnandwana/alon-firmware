@@ -177,6 +177,12 @@ void handle2048 (const UiEvent &ev);
 #define TOUCH_DEBUG 1       // 1 = show a live touch readout at the bottom
 #endif
 
+// TOUCH_TEST: boot into a calibration screen instead of the pet. Tap the
+// rings and report the x,y it prints. Set back to 0 to run the pet.
+#ifndef TOUCH_TEST
+#define TOUCH_TEST 1
+#endif
+
 #define SWIPE_THRESH 72     // px of drag before a swipe fires
 #define TAP_SLOP     24     // movement under this = a tap (not a swipe)
 #define HOLD_MS      750    // long-press duration
@@ -292,6 +298,45 @@ void drawTouchDebug() {
   gfx->fillRect(60, 450, LCD_W - 120, 14, C_BLACK);
   char b[48]; snprintf(b, sizeof(b), "touch n%d  x%d y%d  %s", dbgN, dbgX, dbgY, dbgEv);
   textC(b, LCD_W / 2, 457, 1, C_GREY);
+}
+#endif
+
+void textC(const char *s, int cx, int cy, uint8_t size, uint16_t color);
+void textL(const char *s, int x, int y, uint8_t size, uint16_t color);
+
+#if TOUCH_TEST
+/* ----------------------- TOUCH CALIBRATION -------------------------- */
+// Draws 5 target rings at KNOWN screen positions. The user taps each and
+// reports the x,y we print, which reveals the controller's coordinate map.
+struct TPt { int x, y; const char *n; };
+TPt TTARGETS[5] = { {233,130,"TOP"}, {346,233,"RIGHT"},
+                    {233,336,"BOTTOM"}, {120,233,"LEFT"}, {233,233,"CENTER"} };
+void drawTouchTestStatic() {
+  gfx->fillScreen(C_BLACK);
+  textC("TOUCH TEST", LCD_W/2, 54, 2, C_VIOLET);
+  textC("tap each ring, read me x,y", LCD_W/2, 80, 1, C_GREY);
+  for (int i=0;i<5;i++){ TPt &t=TTARGETS[i];
+    gfx->drawCircle(t.x,t.y,16,C_WHITE);
+    gfx->fillCircle(t.x,t.y,2,C_RED);
+    textC(t.n,t.x,t.y-26,1,C_GREY);
+  }
+}
+void touchTestLoop() {
+  int16_t px[2], py[2];
+  uint8_t n = touch.getPoint(px, py, 2);
+  static uint32_t lastTxt = 0;
+  if (n > 0) {
+    int rx = px[0], ry = py[0];
+    int sx = rx<0?0:(rx>LCD_W-1?LCD_W-1:rx);
+    int sy = ry<0?0:(ry>LCD_H-1?LCD_H-1:ry);
+    gfx->fillCircle(sx, sy, 4, C_CYAN);          // dot where raw maps on panel
+    if (millis()-lastTxt > 70) { lastTxt = millis();
+      gfx->fillRect(30, 288, LCD_W-60, 22, C_BLACK);
+      char b[48]; snprintf(b,sizeof(b),"n%d  x=%d  y=%d", n, rx, ry);
+      textC(b, LCD_W/2, 300, 2, C_YELLOW);
+    }
+  }
+  delay(3);
 }
 #endif
 
@@ -875,6 +920,11 @@ void setup(){
   pinMode(TP_INT, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(TP_INT), onTouchISR, FALLING);
 
+#if TOUCH_TEST
+  drawTouchTestStatic();
+  return;                 // calibration mode: skip the pet
+#endif
+
   // ---- IMU (shake) DISABLED for now ----
   //  The deprecated QMI8658 driver has unbounded wait-loops in its init
   //  that can hang setup() on some units (symptom: stuck on "booting...").
@@ -906,6 +956,10 @@ void enterScreen(){
 }
 
 void loop(){
+#if TOUCH_TEST
+  touchTestLoop();
+  return;
+#endif
   if(screenDirty){ screenDirty=false; enterScreen(); return; }
 
   UiEvent ev = pollGesture();
