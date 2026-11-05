@@ -160,6 +160,7 @@ struct UiEvent { EvType type = EV_NONE; int x = 0, y = 0; };
 // prototypes ABOVE this struct (which caused "'UiEvent' does not name a
 // type"). Keep these if you add more handlers.
 UiEvent pollGesture();
+bool isSwipe(const UiEvent &e);
 void textC(const char *s, int cx, int cy, uint8_t size, uint16_t color);
 void textL(const char *s, int x, int y, uint8_t size, uint16_t color);
 void handleHome (const UiEvent &ev);
