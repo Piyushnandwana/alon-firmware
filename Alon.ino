@@ -160,6 +160,8 @@ struct UiEvent { EvType type = EV_NONE; int x = 0, y = 0; };
 // prototypes ABOVE this struct (which caused "'UiEvent' does not name a
 // type"). Keep these if you add more handlers.
 UiEvent pollGesture();
+void textC(const char *s, int cx, int cy, uint8_t size, uint16_t color);
+void textL(const char *s, int x, int y, uint8_t size, uint16_t color);
 void handleHome (const UiEvent &ev);
 void handleCare (const UiEvent &ev);
 void handleShop (const UiEvent &ev);
@@ -170,21 +172,36 @@ void handleSnake(const UiEvent &ev);
 void handleMole (const UiEvent &ev);
 void handle2048 (const UiEvent &ev);
 
-#define SWIPE_THRESH 60     // px of drag before a swipe fires (mid-drag)
-#define TAP_SLOP     18     // movement under this on release = a tap
-#define HOLD_MS      650    // long-press duration
-#define TP_HEARTBEAT 120    // ms safety poll
+#ifndef TOUCH_DEBUG
+#define TOUCH_DEBUG 1       // 1 = show a live touch readout at the bottom
+#endif
+
+#define SWIPE_THRESH 72     // px of drag before a swipe fires
+#define TAP_SLOP     24     // movement under this = a tap (not a swipe)
+#define HOLD_MS      750    // long-press duration
+#define TP_HEARTBEAT 110    // ms safety poll when idle
+#define JUMP_MAX     170    // ignore single-sample jumps bigger than this (noise)
+#define DOWN_CONFIRM 2      // consecutive present reads to accept a finger
+#define UP_CONFIRM   2      // consecutive absent reads to release
 
 uint32_t lastPollMs = 0;
+uint32_t inputCooldownUntil = 0;   // ignore input briefly after a screen change
+int contactN = 0;                  // consecutive present reads
+int absentN  = 0;                  // consecutive absent reads
 
-// Read one raw point; returns true if a finger is present.
-bool readTouch(int &x, int &y) {
+// Debug: the raw controller report, surfaced on screen so we can tune mapping.
+int dbgN = 0, dbgX = 0, dbgY = 0;
+const char *dbgEv = "idle";
+
+// Read one point. Returns point count; fills mapped x,y of point 0.
+int readTouch(int &x, int &y) {
   int16_t px[2], py[2];
   uint8_t n = touch.getPoint(px, py, 2);
-  if (n == 0) return false;
+  dbgN = n;
+  if (n == 0) return 0;
   int rx = px[0], ry = py[0];
 #if TOUCH_SWAP_XY
-  int t = rx; rx = ry; ry = t;
+  { int t = rx; rx = ry; ry = t; }
 #endif
 #if TOUCH_FLIP_X
   rx = (LCD_W - 1) - rx;
@@ -194,58 +211,88 @@ bool readTouch(int &x, int &y) {
 #endif
   if (rx < 0) rx = 0; if (rx > LCD_W - 1) rx = LCD_W - 1;
   if (ry < 0) ry = 0; if (ry > LCD_H - 1) ry = LCD_H - 1;
-  x = rx; y = ry;
-  return true;
+  x = rx; y = ry; dbgX = rx; dbgY = ry;
+  return n;
 }
 
-// Produce at most one high-level event per call. Button actions use EV_DOWN;
-// swipes fire mid-drag; long-press fires EV_HOLD; a short lift is EV_TAP.
+void resetGesture() { g.down = false; g.swiped = g.held = false; contactN = absentN = 0; }
+inline bool isSwipe(const UiEvent &e) {
+  return e.type == EV_SWIPE_L || e.type == EV_SWIPE_R ||
+         e.type == EV_SWIPE_U || e.type == EV_SWIPE_D;
+}
+
+// Debounced gesture engine. A touch must be confirmed over 2 reads before it
+// counts (kills phantom points); single-sample coordinate spikes are ignored;
+// buttons fire on confirmed DOWN, swipes mid-drag, a clean lift is a TAP.
 UiEvent pollGesture() {
   UiEvent ev;
   uint32_t now = millis();
-  bool due = tpPending || g.down || (now - lastPollMs >= TP_HEARTBEAT);
+  bool due = tpPending || g.down || contactN > 0 || (now - lastPollMs >= TP_HEARTBEAT);
   if (!due) return ev;
   tpPending = false;
   lastPollMs = now;
 
   int x, y;
-  bool present = readTouch(x, y);
+  int n = readTouch(x, y);
+  bool present = (n > 0);
+  bool cooling = (now < inputCooldownUntil);
 
   if (present) {
-    if (!g.down) {                       // ---- finger just landed ----
-      g.down = true; g.swiped = false; g.held = false;
-      g.downX = g.curX = x; g.downY = g.curY = y;
-      g.downMs = now; g.lastSeen = now;
-      ev.type = EV_DOWN; ev.x = x; ev.y = y;   // buttons act immediately
+    absentN = 0;
+    if (g.down) {                                   // noise spike guard
+      int step = abs(x - g.curX) + abs(y - g.curY);
+      if (step > JUMP_MAX) { g.lastSeen = now; return ev; }
+    }
+    contactN++;
+    if (!g.down) {
+      if (contactN >= DOWN_CONFIRM) {               // confirmed finger-down
+        g.down = true; g.swiped = g.held = false;
+        g.downX = g.curX = x; g.downY = g.curY = y;
+        g.downMs = now; g.lastSeen = now;
+        if (!cooling) { ev.type = EV_DOWN; ev.x = x; ev.y = y; dbgEv = "down"; }
+      }
       return ev;
     }
     g.curX = x; g.curY = y; g.lastSeen = now;
     int dx = x - g.downX, dy = y - g.downY;
-    if (!g.swiped && !g.held) {
+    if (!g.swiped && !g.held && !cooling) {
       if (abs(dx) >= SWIPE_THRESH || abs(dy) >= SWIPE_THRESH) {
-        g.swiped = true;                 // ---- swipe mid-drag ----
-        if (abs(dx) > abs(dy)) ev.type = (dx > 0) ? EV_SWIPE_R : EV_SWIPE_L;
-        else                   ev.type = (dy > 0) ? EV_SWIPE_D : EV_SWIPE_U;
+        g.swiped = true;
+        if (abs(dx) > abs(dy)) { ev.type = (dx > 0) ? EV_SWIPE_R : EV_SWIPE_L; dbgEv = (dx > 0) ? "swR" : "swL"; }
+        else                   { ev.type = (dy > 0) ? EV_SWIPE_D : EV_SWIPE_U; dbgEv = (dy > 0) ? "swD" : "swU"; }
         return ev;
       }
-      if (now - g.downMs >= HOLD_MS) {   // ---- long press in place ----
-        g.held = true;
-        ev.type = EV_HOLD; ev.x = x; ev.y = y;
-        return ev;
-      }
+      if (now - g.downMs >= HOLD_MS) { g.held = true; ev.type = EV_HOLD; ev.x = x; ev.y = y; dbgEv = "hold"; return ev; }
     }
   } else {
-    // No point. Only treat as "up" once the heartbeat confirms it's gone.
-    if (g.down && (now - g.lastSeen >= TP_HEARTBEAT)) {
-      bool wasTap = (!g.swiped && !g.held &&
-                     abs(g.curX - g.downX) < TAP_SLOP &&
-                     abs(g.curY - g.downY) < TAP_SLOP);
-      g.down = false;
-      if (wasTap) { ev.type = EV_TAP; ev.x = g.downX; ev.y = g.downY; }
+    contactN = 0;
+    if (g.down) {
+      absentN++;
+      if (absentN >= UP_CONFIRM) {                  // confirmed lift
+        bool wasTap = (!g.swiped && !g.held &&
+                       abs(g.curX - g.downX) < TAP_SLOP &&
+                       abs(g.curY - g.downY) < TAP_SLOP &&
+                       (now - g.downMs) >= 30);
+        g.down = false; absentN = 0;
+        if (wasTap && !cooling) { ev.type = EV_TAP; ev.x = g.downX; ev.y = g.downY; dbgEv = "tap"; }
+      }
     }
   }
   return ev;
 }
+
+#if TOUCH_DEBUG
+// Tiny live readout at the bottom: raw point count + mapped x,y + last event.
+void drawTouchDebug() {
+  static uint32_t last = 0; static int lx = -2, ly = -2, ln = -2;
+  if (millis() - last < 120) return; last = millis();
+  if (dbgX == lx && dbgY == ly && dbgN == ln) return;
+  lx = dbgX; ly = dbgY; ln = dbgN;
+  gfx->fillRect(60, 450, LCD_W - 120, 14, C_BLACK);
+  char b[48]; snprintf(b, sizeof(b), "touch n%d  x%d y%d  %s", dbgN, dbgX, dbgY, dbgEv);
+  textC(b, LCD_W / 2, 457, 1, C_GREY);
+}
+#endif
 
 /* ----------------------- TEXT HELPERS ------------------------------- */
 void textC(const char *s, int cx, int cy, uint8_t size, uint16_t color) {
@@ -491,7 +538,7 @@ void drawCare() {
   textC("swipe down: back", LCD_W/2, 400, 1, C_GREY);
 }
 void handleCare(const UiEvent &ev){
-  if (ev.type==EV_SWIPE_D){ screen=SCR_HOME; screenDirty=true; return; }
+  if (isSwipe(ev)){ screen=SCR_HOME; screenDirty=true; return; }
   if (ev.type!=EV_DOWN) return;
   for (int i=0;i<3;i++){ Btn&b=careBtns[i];
     if (ev.x>=b.x&&ev.x<=b.x+b.w&&ev.y>=b.y&&ev.y<=b.y+b.h){
@@ -529,7 +576,7 @@ void drawShop(){
   textC("swipe down: back", LCD_W/2, 404, 1, C_GREY);
 }
 void handleShop(const UiEvent &ev){
-  if (ev.type==EV_SWIPE_D){ screen=SCR_HOME; screenDirty=true; return; }
+  if (isSwipe(ev)){ screen=SCR_HOME; screenDirty=true; return; }
   if (ev.type!=EV_DOWN) return;
   int y=120;
   for (int i=0;i<THEME_COUNT;i++){
@@ -591,7 +638,7 @@ void drawAgentDynamic(){
   gfx->drawRoundRect(103,330,260,16,5,C_DIMGREY);
 }
 void handleAgent(const UiEvent &ev){
-  if (ev.type==EV_SWIPE_D){ screen=SCR_HOME; screenDirty=true; }
+  if (isSwipe(ev)){ screen=SCR_HOME; screenDirty=true; }
 }
 
 /* ===================================================================
@@ -613,7 +660,7 @@ void drawGames(){
   textC("win studs!   swipe down: back", LCD_W/2, 330, 1, C_GREY);
 }
 void handleGames(const UiEvent &ev){
-  if (ev.type==EV_SWIPE_D){ screen=SCR_HOME; screenDirty=true; return; }
+  if (isSwipe(ev)){ screen=SCR_HOME; screenDirty=true; return; }
   if (ev.type!=EV_DOWN) return;
   for (int i=0;i<3;i++){ Btn&b=gameBtns[i];
     if (ev.x>=b.x&&ev.x<=b.x+b.w&&ev.y>=b.y&&ev.y<=b.y+b.h){
@@ -875,7 +922,7 @@ void loop(){
   }
 
   // if a handler changed screens, let the next loop draw it fresh
-  if(screenDirty) return;
+  if(screenDirty){ inputCooldownUntil = millis() + 300; resetGesture(); return; }
 
   // per-screen animation / ticking
   switch(screen){
@@ -886,6 +933,9 @@ void loop(){
     default: break;
   }
 
+#if TOUCH_DEBUG
+  drawTouchDebug();
+#endif
   decayNeeds();
   checkShake();
   delay(2);          // keeps the touch loop tight & responsive
