@@ -827,14 +827,14 @@ void setup(){
   pinMode(TP_INT, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(TP_INT), onTouchISR, FALLING);
 
-  // ---- IMU (optional: shake). Never hang if it is missing. ----
-  imuOK = imu.begin(Wire, IMU_ADDR, IIC_SDA, IIC_SCL);
-  if(imuOK){
-    imu.configAccelerometer(SensorQMI8658::ACC_RANGE_4G,
-                            SensorQMI8658::ACC_ODR_125Hz,
-                            SensorQMI8658::LPF_MODE_0);
-    imu.enableAccelerometer();
-  } else { Serial.println("imu begin failed (shake disabled)"); }
+  // ---- IMU (shake) DISABLED for now ----
+  //  The deprecated QMI8658 driver has unbounded wait-loops in its init
+  //  that can hang setup() on some units (symptom: stuck on "booting...").
+  //  Shake is optional, so we skip it to guarantee a clean boot. The pet,
+  //  touch, games, shop and care all work without it. Can be re-added
+  //  later with the non-deprecated driver.
+  imuOK = false;
+  (void)imu;  // keep the object; simply unused for now
 
   loadState();
   lastDecay = millis();
