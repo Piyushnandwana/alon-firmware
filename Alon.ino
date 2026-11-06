@@ -563,6 +563,20 @@ void handleHome(const UiEvent &ev) {
   else if (ev.type == EV_SWIPE_R) { screen = SCR_STATS; screenDirty = true; }
 }
 
+/* ------- shared BACK/HOME button for every sub-screen ------- */
+#define BK_X 158
+#define BK_Y 346
+#define BK_W 150
+#define BK_H 38
+void drawBackBtn(){
+  gfx->fillRoundRect(BK_X,BK_Y,BK_W,BK_H,12,THEMES[pet.equipped].accent);
+  textC("HOME", BK_X+BK_W/2, BK_Y+BK_H/2, 2, C_BLACK);
+}
+bool hitBack(const UiEvent &ev){
+  return ev.type==EV_DOWN && ev.x>=BK_X && ev.x<=BK_X+BK_W &&
+         ev.y>=BK_Y && ev.y<=BK_Y+BK_H;
+}
+
 /* ===================================================================
    CARE SCREEN  (feed / clean / medicine)
    =================================================================== */
@@ -580,11 +594,11 @@ void drawCare() {
     textC(b.label,b.x+b.w/2,b.y+b.h/2,2,C_WHITE);
   }
   char buf[24]; snprintf(buf,sizeof(buf),"%lu studs",(unsigned long)pet.studs);
-  textC(buf, LCD_W/2, 360, 2, C_CYAN);
-  textC("swipe down: back", LCD_W/2, 400, 1, C_GREY);
+  textC(buf, LCD_W/2, 120, 2, C_CYAN);
+  drawBackBtn();
 }
 void handleCare(const UiEvent &ev){
-  if (isSwipe(ev)){ screen=SCR_HOME; screenDirty=true; return; }
+  if (isSwipe(ev) || hitBack(ev)){ screen=SCR_HOME; screenDirty=true; return; }
   if (ev.type!=EV_DOWN) return;
   for (int i=0;i<3;i++){ Btn&b=careBtns[i];
     if (ev.x>=b.x&&ev.x<=b.x+b.w&&ev.y>=b.y&&ev.y<=b.y+b.h){
@@ -619,10 +633,10 @@ void drawShop(){
     textL(tag,250,y+26,1,equip?C_GREEN:C_CYAN);
     y+=58;
   }
-  textC("swipe down: back", LCD_W/2, 404, 1, C_GREY);
+  drawBackBtn();
 }
 void handleShop(const UiEvent &ev){
-  if (isSwipe(ev)){ screen=SCR_HOME; screenDirty=true; return; }
+  if (isSwipe(ev) || hitBack(ev)){ screen=SCR_HOME; screenDirty=true; return; }
   if (ev.type!=EV_DOWN) return;
   int y=120;
   for (int i=0;i<THEME_COUNT;i++){
@@ -648,11 +662,11 @@ void drawStats(){
   drawStatBar(2,"FUN",   pet.fun,   110,240,246);
   drawStatBar(3,"CLEAN", pet.clean, 110,290,246);
   char buf[40]; snprintf(buf,sizeof(buf),"Lv %d   xp %lu/%d",pet.level,(unsigned long)pet.xp,xpForLevel(pet.level));
-  textC(buf,LCD_W/2,340,2,C_CYAN);
-  textC("swipe right: back", LCD_W/2, 404, 1, C_GREY);
+  textC(buf,LCD_W/2,322,2,C_CYAN);
+  drawBackBtn();
 }
 void handleStats(const UiEvent &ev){
-  if (ev.type==EV_SWIPE_R||ev.type==EV_SWIPE_L||ev.type==EV_SWIPE_D){ screen=SCR_HOME; screenDirty=true; }
+  if (isSwipe(ev) || hitBack(ev)){ screen=SCR_HOME; screenDirty=true; }
 }
 
 /* ===================================================================
@@ -665,7 +679,7 @@ void drawAgentStatic(){
   textC("AGENT", LCD_W/2, 46, 3, THEMES[pet.equipped].accent);
   drawAvatar(3, LCD_W/2, 180, 95);
   textC("listening...", LCD_W/2, 300, 2, C_CYAN);
-  textC("swipe down: back", LCD_W/2, 404, 1, C_GREY);
+  drawBackBtn();
 }
 void drawAgentDynamic(){
   uint32_t now=millis();
@@ -684,7 +698,7 @@ void drawAgentDynamic(){
   gfx->drawRoundRect(103,330,260,16,5,C_DIMGREY);
 }
 void handleAgent(const UiEvent &ev){
-  if (isSwipe(ev)){ screen=SCR_HOME; screenDirty=true; }
+  if (isSwipe(ev) || hitBack(ev)){ screen=SCR_HOME; screenDirty=true; }
 }
 
 /* ===================================================================
@@ -703,10 +717,11 @@ void drawGames(){
     gfx->drawRoundRect(b.x,b.y,b.w,b.h,14,THEMES[pet.equipped].accent);
     textC(b.label,b.x+b.w/2,b.y+b.h/2,2,C_WHITE);
   }
-  textC("win studs!   swipe down: back", LCD_W/2, 330, 1, C_GREY);
+  textC("win studs!", LCD_W/2, 326, 1, C_GREY);
+  drawBackBtn();
 }
 void handleGames(const UiEvent &ev){
-  if (isSwipe(ev)){ screen=SCR_HOME; screenDirty=true; return; }
+  if (isSwipe(ev) || hitBack(ev)){ screen=SCR_HOME; screenDirty=true; return; }
   if (ev.type!=EV_DOWN) return;
   for (int i=0;i<3;i++){ Btn&b=gameBtns[i];
     if (ev.x>=b.x&&ev.x<=b.x+b.w&&ev.y>=b.y&&ev.y<=b.y+b.h){
@@ -758,6 +773,7 @@ void stepSnake(){
   char b[20]; snprintf(b,sizeof(b),"len %d",snLen); textC(b,LCD_W/2,16,2,C_CYAN);
 }
 void handleSnake(const UiEvent &ev){
+  if (ev.type==EV_HOLD){ screen=SCR_GAMES; screenDirty=true; return; }   // hold = quit
   if (ev.type==EV_SWIPE_D && snDead){ screen=SCR_GAMES; screenDirty=true; return; }
   if (ev.type==EV_SWIPE_U && snDir!=2) snDir=0;
   else if (ev.type==EV_SWIPE_R && snDir!=3) snDir=1;
@@ -798,6 +814,7 @@ void stepMole(){
   char b[20]; snprintf(b,sizeof(b),"hits %d",moleScore); textC(b,LCD_W/2,72,1,C_CYAN);
 }
 void handleMole(const UiEvent &ev){
+  if (ev.type==EV_HOLD){ screen=SCR_GAMES; screenDirty=true; return; }   // hold = quit
   if (ev.type==EV_SWIPE_D && millis()-moleStart>30000){ screen=SCR_GAMES; screenDirty=true; return; }
   if (ev.type!=EV_DOWN) return;
   int dx=ev.x-MOLE_X[moleIdx], dy=ev.y-MOLE_Y[moleIdx];
