@@ -1323,14 +1323,11 @@ void setup(){
 
   // ---- IMU (QMI8658): probe first so a missing/stuck chip can't hang boot,
   //      then run Waveshare's proven init sequence. Enables shake + sensor apps.
-  if(imuProbe()){
-    imuOK = imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS, IIC_SDA, IIC_SCL);
-    if(imuOK){
-      // EXACTLY Waveshare's working sequence: accelerometer only.
-      imu.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_1000Hz, SensorQMI8658::LPF_MODE_0);
-      imu.enableAccelerometer();
-    }
-  } else { imuOK=false; Serial.println("IMU not detected (sensor apps disabled)"); }
+  // NOTE: the SensorLib QMI8658 init blocks on this unit (hangs boot), so it
+  // is disabled here to guarantee a clean boot. Sensor apps show "IMU not
+  // available" until we bring it up through a non-blocking path.
+  imuOK = false;
+  (void)imuProbe; (void)imu;
 
   // ---- Real-time clock (PCF85063) for the home clock + settings ----
   rtcOK = rtc.begin(Wire, IIC_SDA, IIC_SCL);
