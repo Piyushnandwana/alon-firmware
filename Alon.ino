@@ -83,6 +83,7 @@ Arduino_CO5300 *gfx = new Arduino_CO5300(
 TouchDrvCST92xx touch;
 SensorQMI8658   imu;
 bool imuOK = false;
+float accX=0, accY=0, accZ=1, gyrX=0, gyrY=0, gyrZ=0;
 
 SensorPCF85063  rtc;
 bool rtcOK = false;
@@ -104,6 +105,30 @@ int batteryPercent(){
   if(Wire.requestFrom(PMU_ADDR,1)!=1) return -1;
   int p = Wire.read();
   return (p>=0 && p<=100) ? p : -1;
+}
+// AXP2101 charging status (reg 0x00 bit5 = battery present; reg 0x01 charge state).
+bool batteryCharging(){
+  Wire.beginTransmission(PMU_ADDR); Wire.write(0x01);
+  if(Wire.endTransmission(false)!=0) return false;
+  if(Wire.requestFrom(PMU_ADDR,1)!=1) return false;
+  int s=Wire.read();
+  return ((s>>5)&0x03)==0x01;   // 01b = charging
+}
+
+// Bounded I2C probe of the QMI8658 WHO_AM_I (0x00 -> 0x05). Prevents the
+// library init from hanging when the IMU isn't answering.
+bool imuProbe(){
+  Wire.beginTransmission(IMU_ADDR); Wire.write(0x00);
+  if(Wire.endTransmission(false)!=0) return false;
+  if(Wire.requestFrom(IMU_ADDR,1)!=1) return false;
+  return Wire.read()==0x05;
+}
+bool imuRead(){
+  if(!imuOK) return false;
+  if(!imu.getDataReady()) return false;
+  imu.getAccelerometer(accX,accY,accZ);
+  imu.getGyroscope(gyrX,gyrY,gyrZ);
+  return true;
 }
 
 /* ----------------------- COLOR / THEME ------------------------------ */
@@ -153,7 +178,9 @@ void reward(uint32_t studs, uint32_t xp);
 /* ----------------------- SCREENS ------------------------------------ */
 enum Screen {
   SCR_HOME, SCR_CARE, SCR_SHOP, SCR_GAMES, SCR_STATS, SCR_AGENT,
-  SCR_SNAKE, SCR_MOLE, SCR_2048, SCR_SETTINGS
+  SCR_SNAKE, SCR_MOLE, SCR_2048, SCR_SETTINGS,
+  SCR_APPS, SCR_LEVEL, SCR_HORIZON, SCR_STEPS, SCR_CLOCK,
+  SCR_STOPWATCH, SCR_TIMER, SCR_BATTERY, SCR_FLASH, SCR_SYSINFO
 };
 Screen screen = SCR_HOME;
 bool    screenDirty = true;   // force a full redraw of the current screen
@@ -197,6 +224,16 @@ void handle2048 (const UiEvent &ev);
 bool hitBack    (const UiEvent &ev);
 bool onAvatar   (const UiEvent &ev);
 void handleSettings(const UiEvent &ev);
+void handleApps (const UiEvent &ev);
+void handleLevel(const UiEvent &ev);
+void handleMarble(const UiEvent &ev);
+void handleSteps(const UiEvent &ev);
+void handleClock(const UiEvent &ev);
+void handleStopwatch(const UiEvent &ev);
+void handleTimer(const UiEvent &ev);
+void handleBattery(const UiEvent &ev);
+void handleFlash(const UiEvent &ev);
+void handleSysinfo(const UiEvent &ev);
 
 #ifndef TOUCH_DEBUG
 #define TOUCH_DEBUG 0       // 1 = show a live touch readout at the bottom
@@ -565,7 +602,7 @@ void drawHomeStatic() {
   gfx->fillRect(0, 0, 466, 30, C_BLACK);     // top HUD backing (over dark rim)
   gfx->fillRect(0, 432, 466, 34, C_BLACK);   // bottom HUD backing
   lastStudsShown = 0xFFFFFFFF; lastLevelShown = -1;
-  textC("L:care  R:shop  U:games  D:settings", LCD_W/2, 458, 1, C_GREY);
+  textC("L:care  R:shop  U:apps  D:settings", LCD_W/2, 458, 1, C_GREY);
 }
 
 void drawHomeDynamic() {
@@ -605,7 +642,7 @@ void handleHome(const UiEvent &ev) {
   else if (ev.type == EV_HOLD && central) { screen = SCR_AGENT; screenDirty = true; }
   else if (ev.type == EV_SWIPE_L) { screen = SCR_CARE;     screenDirty = true; }
   else if (ev.type == EV_SWIPE_R) { screen = SCR_SHOP;     screenDirty = true; }
-  else if (ev.type == EV_SWIPE_U) { screen = SCR_GAMES;    screenDirty = true; }
+  else if (ev.type == EV_SWIPE_U) { screen = SCR_APPS;     screenDirty = true; }
   else if (ev.type == EV_SWIPE_D) { screen = SCR_SETTINGS; screenDirty = true; }
 }
 
@@ -1017,6 +1054,244 @@ void checkShake(){
 }
 
 /* ===================================================================
+   APPS LAUNCHER  +  MINI-APPS   (swipe up from home)
+   =================================================================== */
+struct AppDef { const char *name; Screen scr; };
+AppDef APPS[] = {
+  {"Games", SCR_GAMES}, {"Leveler", SCR_LEVEL}, {"Marble", SCR_HORIZON},
+  {"Steps", SCR_STEPS}, {"Clock", SCR_CLOCK},  {"Stopwatch", SCR_STOPWATCH},
+  {"Timer", SCR_TIMER}, {"Battery", SCR_BATTERY}, {"Light", SCR_FLASH},
+  {"System", SCR_SYSINFO},
+};
+const int APP_COUNT = sizeof(APPS)/sizeof(APPS[0]);
+#define APPS_PER_PAGE 6
+int appPage = 0;
+
+void appTileXY(int i,int &x,int &y){ int c=i%3, r=i/3; x=24+c*144; y=100+r*100; }
+
+void drawApps(){
+  gfx->fillScreen(C_BLACK);
+  textC("APPS", 233, 40, 3, THEMES[pet.equipped].accent);
+  int start=appPage*APPS_PER_PAGE;
+  for(int i=0;i<APPS_PER_PAGE;i++){
+    int idx=start+i; if(idx>=APP_COUNT) break;
+    int x,y; appTileXY(i,x,y);
+    gfx->fillRoundRect(x,y,130,88,14,C_DIMGREY);
+    gfx->drawRoundRect(x,y,130,88,14,THEMES[pet.equipped].accent);
+    textC(APPS[idx].name, x+65, y+44, 2, C_WHITE);
+  }
+  int pages=(APP_COUNT+APPS_PER_PAGE-1)/APPS_PER_PAGE;
+  for(int p=0;p<pages;p++)
+    gfx->fillCircle(233-(pages-1)*9+p*18, 312, 4, p==appPage?THEMES[pet.equipped].accent:C_DIMGREY);
+  textC("swipe L/R: pages", 233, 334, 1, C_GREY);
+  drawBackBtn();
+}
+void handleApps(const UiEvent &ev){
+  int pages=(APP_COUNT+APPS_PER_PAGE-1)/APPS_PER_PAGE;
+  if(hitBack(ev) || ev.type==EV_SWIPE_D){ screen=SCR_HOME; screenDirty=true; return; }
+  if(ev.type==EV_SWIPE_L){ appPage=(appPage+1)%pages; screenDirty=true; return; }
+  if(ev.type==EV_SWIPE_R){ appPage=(appPage+pages-1)%pages; screenDirty=true; return; }
+  if(ev.type!=EV_DOWN) return;
+  int start=appPage*APPS_PER_PAGE;
+  for(int i=0;i<APPS_PER_PAGE;i++){
+    int idx=start+i; if(idx>=APP_COUNT) break;
+    int x,y; appTileXY(i,x,y);
+    if(ev.x>=x&&ev.x<=x+130&&ev.y>=y&&ev.y<=y+88){ screen=APPS[idx].scr; screenDirty=true; return; }
+  }
+}
+
+// ---- small helper: standard app header + back ----
+void appHeader(const char *title){
+  gfx->fillScreen(C_BLACK);
+  textC(title, 233, 36, 2, THEMES[pet.equipped].accent);
+}
+bool appBack(const UiEvent &ev){
+  if(hitBack(ev) || ev.type==EV_SWIPE_D){ screen=SCR_APPS; screenDirty=true; return true; }
+  return false;
+}
+
+/* ---------------- LEVELER (bubble level, uses accelerometer) ------ */
+void drawLevelStatic(){ appHeader("LEVELER"); drawBackBtn(); }
+void tickLevel(){
+  static int px=233,py=210; static uint32_t last=0;
+  if(millis()-last<45) return; last=millis();
+  if(!imuOK){ textC("IMU not available",233,210,2,C_RED); return; }
+  if(!imuRead()) return;
+  gfx->fillCircle(px,py,18,C_BLACK);
+  int bx=233-(int)(accX*150), by=210+(int)(accY*150);
+  float dx=bx-233, dy=by-210, d=sqrtf(dx*dx+dy*dy);
+  if(d>104){ bx=233+(int)(dx*104/d); by=210+(int)(dy*104/d); }
+  gfx->drawCircle(233,210,120,C_DIMGREY);
+  gfx->drawCircle(233,210,30,C_GREEN);
+  bool level=(abs(bx-233)<16 && abs(by-210)<16);
+  gfx->fillCircle(bx,by,16, level?C_GREEN:C_CYAN);
+  px=bx; py=by;
+  gfx->fillRect(120,348,226,22,C_BLACK);
+  char b[28]; snprintf(b,sizeof(b),"%d, %d deg",(int)(accX*90),(int)(accY*90));
+  textC(level?"LEVEL!":b,233,356,2, level?C_GREEN:C_WHITE);
+}
+void handleLevel(const UiEvent &ev){ appBack(ev); }
+
+/* ---------------- MARBLE (tilt a ball around a bowl) -------------- */
+float mbx=233,mby=233,mvx=0,mvy=0;
+void drawMarbleStatic(){ appHeader("MARBLE"); gfx->drawCircle(233,236,150,C_DIMGREY); mbx=mby=233; mvx=mvy=0; drawBackBtn(); }
+void tickMarble(){
+  static uint32_t last=0; if(millis()-last<33) return; last=millis();
+  if(!imuOK){ textC("IMU not available",233,236,2,C_RED); return; }
+  if(!imuRead()) return;
+  gfx->fillCircle((int)mbx,(int)mby,12,C_BLACK);
+  mvx += accX*1.6f; mvy -= accY*1.6f; mvx*=0.93f; mvy*=0.93f;
+  mbx += mvx*0.12f; mby += mvy*0.12f;
+  float dx=mbx-233, dy=mby-236, d=sqrtf(dx*dx+dy*dy);
+  if(d>138){ mbx=233+dx*138/d; mby=236+dy*138/d; mvx*=-0.5f; mvy*=-0.5f; }
+  gfx->drawCircle(233,236,150,C_DIMGREY);
+  gfx->fillCircle((int)mbx,(int)mby,12,THEMES[pet.equipped].accent);
+}
+void handleMarble(const UiEvent &ev){ if(appBack(ev)) return; if(ev.type==EV_HOLD){ mbx=mby=233; mvx=mvy=0; } }
+
+/* ---------------- STEP COUNTER (accel peak detect) --------------- */
+long stepCount=0;
+void drawStepsStatic(){ appHeader("STEPS"); gfx->fillRoundRect(133,300,200,40,10,C_DIMGREY); textC("RESET",233,320,2,C_WHITE); drawBackBtn(); }
+void tickSteps(){
+  if(imuOK && imuRead()){
+    float mag=sqrtf(accX*accX+accY*accY+accZ*accZ);
+    static float lp=1; lp=lp*0.85f+mag*0.15f;
+    static uint32_t lastStep=0;
+    if(mag-lp>0.22f && millis()-lastStep>300){ stepCount++; lastStep=millis(); }
+  }
+  static long shown=-1;
+  if(stepCount!=shown){ shown=stepCount; gfx->fillRect(80,150,306,90,C_BLACK);
+    char b[16]; snprintf(b,sizeof(b),"%ld",stepCount); textC(b,233,195,6,C_CYAN); }
+}
+void handleSteps(const UiEvent &ev){
+  if(appBack(ev)) return;
+  if(ev.type==EV_DOWN && ev.x>=133&&ev.x<=333&&ev.y>=300&&ev.y<=340){ stepCount=0; screenDirty=true; }
+}
+
+/* ---------------- ANALOG CLOCK (from RTC) ------------------------ */
+void clockHand(float deg,int len,int w,uint16_t col){
+  float a=deg*0.0174533f; int x2=233+(int)(sinf(a)*len), y2=236-(int)(cosf(a)*len);
+  gfx->drawLine(233,236,x2,y2,col);
+  if(w>1){ gfx->drawLine(232,236,x2,y2,col); gfx->drawLine(234,236,x2,y2,col); }
+}
+void drawClockStatic(){ appHeader("CLOCK"); drawBackBtn(); }
+void tickClock(){
+  static int ls=-1;
+  if(!rtcOK){ textC("set time in settings",233,236,2,C_GREY); return; }
+  RTC_DateTime t=rtc.getDateTime(); int s=t.getSecond();
+  if(s==ls) return; ls=s;
+  int h=t.getHour(), m=t.getMinute();
+  gfx->fillCircle(233,236,145,C_BLACK);
+  gfx->drawCircle(233,236,145,C_DIMGREY);
+  for(int i=0;i<12;i++){ float a=i*30*0.0174533f;
+    gfx->fillCircle(233+(int)(sinf(a)*128),236-(int)(cosf(a)*128),2,C_GREY); }
+  clockHand((h%12)*30+m*0.5f, 70, 2, C_CYAN);
+  clockHand(m*6, 100, 2, C_WHITE);
+  clockHand(s*6, 115, 1, C_RED);
+  gfx->fillCircle(233,236,4,THEMES[pet.equipped].accent);
+  gfx->fillRect(150,392,166,20,C_BLACK);
+  char b[16]; snprintf(b,sizeof(b),"%02d:%02d:%02d",h,m,s); textC(b,233,400,2,C_CYAN);
+}
+void handleClock(const UiEvent &ev){ appBack(ev); }
+
+/* ---------------- STOPWATCH -------------------------------------- */
+uint32_t swStart=0, swAccum=0; bool swRun=false;
+void drawStopwatchStatic(){
+  appHeader("STOPWATCH");
+  gfx->fillRoundRect(96,300,120,42,10,C_GREEN); textC(swRun?"STOP":"START",156,321,2,C_BLACK);
+  gfx->fillRoundRect(250,300,120,42,10,C_DIMGREY); textC("RESET",310,321,2,C_WHITE);
+  drawBackBtn();
+}
+void tickStopwatch(){
+  static uint32_t last=0; if(millis()-last<60) return; last=millis();
+  uint32_t ms = swAccum + (swRun? millis()-swStart : 0);
+  gfx->fillRect(80,170,306,60,C_BLACK);
+  char b[16]; snprintf(b,sizeof(b),"%02lu:%02lu.%02lu",(unsigned long)(ms/60000),(unsigned long)((ms/1000)%60),(unsigned long)((ms/10)%100));
+  textC(b,233,200,4,C_WHITE);
+}
+void handleStopwatch(const UiEvent &ev){
+  if(appBack(ev)) return;
+  if(ev.type!=EV_DOWN) return;
+  if(ev.x>=96&&ev.x<=216&&ev.y>=300&&ev.y<=342){
+    if(swRun){ swAccum+=millis()-swStart; swRun=false; } else { swStart=millis(); swRun=true; }
+    screenDirty=true;
+  } else if(ev.x>=250&&ev.x<=370&&ev.y>=300&&ev.y<=342){ swRun=false; swAccum=0; swStart=0; screenDirty=true; }
+}
+
+/* ---------------- TIMER ------------------------------------------ */
+int timerMin=5; uint32_t timerEnd=0; bool timerRun=false; bool timerDone=false;
+void drawTimerStatic(){
+  appHeader("TIMER");
+  gfx->fillRoundRect(96,150,44,44,10,C_DIMGREY); textC("-",118,172,3,C_WHITE);
+  gfx->fillRoundRect(326,150,44,44,10,C_DIMGREY); textC("+",348,172,3,C_WHITE);
+  gfx->fillRoundRect(96,300,274,42,10,timerRun?C_RED:C_GREEN); textC(timerRun?"STOP":"START",233,321,2,C_BLACK);
+  drawBackBtn();
+}
+void tickTimer(){
+  static uint32_t last=0; if(millis()-last<100) return; last=millis();
+  long rem;
+  if(timerRun){ rem=(long)timerEnd-(long)millis(); if(rem<=0){ rem=0; timerRun=false; timerDone=true; } }
+  else rem = timerDone?0:(long)timerMin*60000;
+  gfx->fillRect(150,158,176,36,C_BLACK);
+  char b[12]; snprintf(b,sizeof(b),"%02ld:%02ld",(rem/60000),(rem/1000)%60); textC(b,233,176,3,timerDone?C_RED:C_WHITE);
+  if(timerDone){ static bool f=false; f=!f; gfx->fillRect(60,210,346,60,f?C_RED:C_BLACK); if(f) textC("TIME!",233,240,4,C_WHITE); }
+}
+void handleTimer(const UiEvent &ev){
+  if(appBack(ev)) return;
+  if(ev.type!=EV_DOWN) return;
+  if(ev.y>=150&&ev.y<=194){
+    if(ev.x>=96&&ev.x<=140){ timerMin=clampi(timerMin-1,1,99); timerDone=false; screenDirty=true; }
+    if(ev.x>=326&&ev.x<=370){ timerMin=clampi(timerMin+1,1,99); timerDone=false; screenDirty=true; }
+  }
+  if(ev.x>=96&&ev.x<=370&&ev.y>=300&&ev.y<=342){
+    if(timerRun){ timerRun=false; } else { timerEnd=millis()+(uint32_t)timerMin*60000; timerRun=true; timerDone=false; }
+    screenDirty=true;
+  }
+}
+
+/* ---------------- BATTERY DASHBOARD ------------------------------ */
+void drawBatteryStatic(){ appHeader("BATTERY"); drawBackBtn(); }
+void tickBattery(){
+  static uint32_t last=0; if(millis()-last<2000) return; last=millis();
+  int b=batteryPercent(); bool chg=batteryCharging();
+  gfx->fillRect(60,120,346,180,C_BLACK);
+  // battery outline
+  gfx->drawRoundRect(143,150,180,90,10,C_WHITE); gfx->fillRect(323,175,10,40,C_WHITE);
+  if(b>=0){ uint16_t c=b<20?C_RED:(b<50?C_YELLOW:C_GREEN); gfx->fillRoundRect(149,156,(168)*b/100,78,6,c); }
+  char t[16]; if(b>=0) snprintf(t,sizeof(t),"%d%%",b); else snprintf(t,sizeof(t),"--");
+  textC(t,233,280,3,C_WHITE);
+  textC(chg?"charging":"on battery",233,312,2,chg?C_GREEN:C_GREY);
+}
+void handleBattery(const UiEvent &ev){ appBack(ev); }
+
+/* ---------------- FLASHLIGHT ------------------------------------- */
+void drawFlashStatic(){ gfx->fillScreen(C_WHITE); gfx->setBrightness(255); textC("tap to exit",233,440,2,C_DIMGREY); }
+void handleFlash(const UiEvent &ev){
+  if(ev.type==EV_TAP || ev.type==EV_HOLD || hitBack(ev) || isSwipe(ev)){
+    gfx->setBrightness(brightness); screen=SCR_APPS; screenDirty=true;
+  }
+}
+
+/* ---------------- SYSTEM INFO ------------------------------------ */
+void drawSysinfoStatic(){
+  appHeader("SYSTEM");
+  char b[40];
+  textL("Chip:",70,110,2,C_GREY);  textL((char*)ESP.getChipModel(),200,110,2,C_WHITE);
+  snprintf(b,sizeof(b),"%d MHz",ESP.getCpuFreqMHz()); textL("CPU:",70,146,2,C_GREY); textL(b,200,146,2,C_WHITE);
+  snprintf(b,sizeof(b),"%u MB",(unsigned)(ESP.getFlashChipSize()/1048576)); textL("Flash:",70,182,2,C_GREY); textL(b,200,182,2,C_WHITE);
+  snprintf(b,sizeof(b),"%u KB",(unsigned)(ESP.getPsramSize()/1024)); textL("PSRAM:",70,218,2,C_GREY); textL(b,200,218,2,C_WHITE);
+  drawBackBtn();
+}
+void tickSysinfo(){
+  static uint32_t last=0; if(millis()-last<1000) return; last=millis();
+  gfx->fillRect(60,254,346,60,C_BLACK);
+  char b[40]; snprintf(b,sizeof(b),"%u KB",(unsigned)(ESP.getFreeHeap()/1024)); textL("Free RAM:",70,254,2,C_GREY); textL(b,220,254,2,C_WHITE);
+  uint32_t up=millis()/1000; snprintf(b,sizeof(b),"%lum %lus",(unsigned long)(up/60),(unsigned long)(up%60));
+  textL("Uptime:",70,290,2,C_GREY); textL(b,220,290,2,C_WHITE);
+}
+void handleSysinfo(const UiEvent &ev){ appBack(ev); }
+
+/* ===================================================================
    SETUP / LOOP
    =================================================================== */
 void setup(){
@@ -1048,14 +1323,17 @@ void setup(){
   return;                 // calibration mode: skip the pet
 #endif
 
-  // ---- IMU (shake) DISABLED for now ----
-  //  The deprecated QMI8658 driver has unbounded wait-loops in its init
-  //  that can hang setup() on some units (symptom: stuck on "booting...").
-  //  Shake is optional, so we skip it to guarantee a clean boot. The pet,
-  //  touch, games, shop and care all work without it. Can be re-added
-  //  later with the non-deprecated driver.
-  imuOK = false;
-  (void)imu;  // keep the object; simply unused for now
+  // ---- IMU (QMI8658): probe first so a missing/stuck chip can't hang boot,
+  //      then run Waveshare's proven init sequence. Enables shake + sensor apps.
+  if(imuProbe()){
+    imuOK = imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS, IIC_SDA, IIC_SCL);
+    if(imuOK){
+      imu.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_1000Hz, SensorQMI8658::LPF_MODE_0);
+      imu.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS, SensorQMI8658::GYR_ODR_896_8Hz, SensorQMI8658::LPF_MODE_0);
+      imu.enableAccelerometer();
+      imu.enableGyroscope();
+    }
+  } else { imuOK=false; Serial.println("IMU not detected (sensor apps disabled)"); }
 
   // ---- Real-time clock (PCF85063) for the home clock + settings ----
   rtcOK = rtc.begin(Wire, IIC_SDA, IIC_SCL);
@@ -1095,6 +1373,16 @@ void enterScreen(){
     case SCR_MOLE:  drawMoleStatic();  break;
     case SCR_2048:  drawG2Static();    break;
     case SCR_SETTINGS: drawSettings(); break;
+    case SCR_APPS:    drawApps();        break;
+    case SCR_LEVEL:   drawLevelStatic(); break;
+    case SCR_HORIZON: drawMarbleStatic();break;
+    case SCR_STEPS:   drawStepsStatic(); break;
+    case SCR_CLOCK:   drawClockStatic(); break;
+    case SCR_STOPWATCH: drawStopwatchStatic(); break;
+    case SCR_TIMER:   drawTimerStatic(); break;
+    case SCR_BATTERY: drawBatteryStatic();break;
+    case SCR_FLASH:   drawFlashStatic(); break;
+    case SCR_SYSINFO: drawSysinfoStatic();break;
   }
 }
 
@@ -1118,6 +1406,16 @@ void loop(){
     case SCR_MOLE:  handleMole(ev);  break;
     case SCR_2048:  handle2048(ev);  break;
     case SCR_SETTINGS: handleSettings(ev); break;
+    case SCR_APPS:    handleApps(ev);     break;
+    case SCR_LEVEL:   handleLevel(ev);    break;
+    case SCR_HORIZON: handleMarble(ev);   break;
+    case SCR_STEPS:   handleSteps(ev);    break;
+    case SCR_CLOCK:   handleClock(ev);    break;
+    case SCR_STOPWATCH: handleStopwatch(ev); break;
+    case SCR_TIMER:   handleTimer(ev);    break;
+    case SCR_BATTERY: handleBattery(ev);  break;
+    case SCR_FLASH:   handleFlash(ev);    break;
+    case SCR_SYSINFO: handleSysinfo(ev);  break;
   }
 
   // if a handler changed screens, let the next loop draw it fresh
@@ -1126,6 +1424,14 @@ void loop(){
   // per-screen animation / ticking
   switch(screen){
     case SCR_HOME:  drawHomeDynamic(); animateAvatar(); break;
+    case SCR_LEVEL:   tickLevel();     break;
+    case SCR_HORIZON: tickMarble();    break;
+    case SCR_STEPS:   tickSteps();     break;
+    case SCR_CLOCK:   tickClock();     break;
+    case SCR_STOPWATCH: tickStopwatch(); break;
+    case SCR_TIMER:   tickTimer();     break;
+    case SCR_BATTERY: tickBattery();   break;
+    case SCR_SYSINFO: tickSysinfo();   break;
     case SCR_AGENT: drawAgentDynamic();break;
     case SCR_SNAKE: stepSnake();       break;
     case SCR_MOLE:  stepMole();        break;
