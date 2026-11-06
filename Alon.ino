@@ -174,6 +174,7 @@ void handleSnake(const UiEvent &ev);
 void handleMole (const UiEvent &ev);
 void handle2048 (const UiEvent &ev);
 bool hitBack    (const UiEvent &ev);
+bool onAvatar   (const UiEvent &ev);
 
 #ifndef TOUCH_DEBUG
 #define TOUCH_DEBUG 0       // 1 = show a live touch readout at the bottom
