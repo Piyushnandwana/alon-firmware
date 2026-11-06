@@ -45,6 +45,7 @@
 #include "Arduino_GFX_Library.h"
 #include "TouchDrvCSTXXX.hpp"
 #include "SensorQMI8658.hpp"
+#include "img_alon.h"           // real LEGO avatar images (idle/sleep/agent/celebration)
 
 /* ----------------------- BOARD PIN MAP ------------------------------ */
 // Display (CO5300 QSPI)
@@ -454,11 +455,16 @@ void drawAvatar(int face, int cx, int cy, int scale /*percent 100=normal*/) {
 /* celebration splash on level up */
 void celebrate() {
   gfx->fillScreen(C_BLACK);
-  drawAvatar(1, LCD_W / 2, LCD_H / 2 - 10, 120);
+  gfx->draw16bitRGBBitmap((466-ALON_AV_W)/2, 150, img_celebration, ALON_AV_W, ALON_AV_H);
   char buf[24]; snprintf(buf, sizeof(buf), "LEVEL %d!", pet.level);
-  textC(buf, LCD_W / 2, 120, 3, THEMES[pet.equipped].accent);
-  textC("+20 studs", LCD_W / 2, LCD_H - 120, 2, C_WHITE);
-  for (int r = 20; r < 230; r += 22) { gfx->drawCircle(LCD_W/2, LCD_H/2, r, C_VIOLET); }
+  textC(buf, LCD_W / 2, 90, 3, THEMES[pet.equipped].accent);
+  textC("+20 studs", LCD_W / 2, 360, 2, C_WHITE);
+  // confetti sparkles
+  for (int i = 0; i < 40; i++) {
+    int a = esp_random()%360; int rr = 150 + esp_random()%70;
+    int x = 233 + (int)(rr*cosf(a*0.0174f)), y = 233 + (int)(rr*sinf(a*0.0174f));
+    gfx->fillCircle(x, y, 2, (i&1)?THEMES[pet.equipped].accent:C_YELLOW);
+  }
   delay(1400);
   screenDirty = true;
 }
@@ -477,6 +483,63 @@ void drawStatBar(int idx, const char *label, int val, int x, int y, int w) {
   gfx->fillRoundRect(x + 2, y + 2, fw < 4 ? 4 : fw, h - 4, 5, col);
   gfx->setTextColor(C_WHITE); gfx->setTextSize(1);
   gfx->setCursor(x, y - 11); gfx->print(label);
+}
+
+/* ===================================================================
+   ANIMATED AVATAR  (home screen)
+   Draws Alon's face with squash/stretch, blinking, and a pet reaction
+   (bounce + happy eyes + rising hearts). Only the avatar box is redrawn.
+   =================================================================== */
+#define AV_W   ALON_AV_W            // 180
+#define AV_H   ALON_AV_H            // 171
+#define AV_X   ((466-AV_W)/2)       // 143  (centered)
+#define AV_TOP 60                   // avatar top edge
+#define AVBOX_X (AV_X-4)
+#define AVBOX_Y (AV_TOP-16)
+#define AVBOX_W (AV_W+8)
+#define AVBOX_H (AV_H+22)
+
+bool     petAnimOn = false;
+uint32_t petAnimStart = 0;
+uint32_t lastAvatarDraw = 0;
+struct Heart { bool on; int x; } hearts[3];
+
+void drawHeart(int cx,int cy,int s,uint16_t col){
+  gfx->fillCircle(cx-s/2, cy, s/2, col);
+  gfx->fillCircle(cx+s/2, cy, s/2, col);
+  gfx->fillTriangle(cx-s, cy, cx+s, cy, cx, cy+s+s/3, col);
+}
+
+const uint16_t* avatarIdleImg(){ return pet.sleeping ? img_sleep : img_idle; }
+
+// Blit the resting avatar (idle, or sleep when napping).
+void drawAvatarStatic(){
+  gfx->fillRect(AVBOX_X, AVBOX_Y, AVBOX_W, AVBOX_H, C_BLACK);
+  gfx->draw16bitRGBBitmap(AV_X, AV_TOP, avatarIdleImg(), AV_W, AV_H);
+}
+
+// Pet reaction: the celebration render bounces while hearts rise (~850ms),
+// then settles back to the idle image. Called every home loop.
+void animateAvatar(){
+  if(!petAnimOn) return;
+  uint32_t now = millis();
+  if(now - lastAvatarDraw < 45) return;
+  lastAvatarDraw = now;
+  int age = now - petAnimStart;
+  if(age >= 850){ petAnimOn = false; drawAvatarStatic(); return; }
+  float t = age/850.0f;
+  int yoff = -(int)(16*sinf(t*3.14159f));           // little hop
+  gfx->fillRect(AVBOX_X, AVBOX_Y, AVBOX_W, AVBOX_H, C_BLACK);
+  gfx->draw16bitRGBBitmap(AV_X, AV_TOP+yoff, img_celebration, AV_W, AV_H);
+  int rise = age*52/850;
+  for(int i=0;i<3;i++) if(hearts[i].on)
+    drawHeart(hearts[i].x, AV_TOP+70 - rise - i*8, 7, C_RED);
+}
+
+// Trigger the pet reaction the instant the face is tapped.
+void triggerPet(){
+  petAnimOn = true; petAnimStart = millis(); lastAvatarDraw = 0;
+  for(int i=0;i<3;i++){ hearts[i].on = true; hearts[i].x = AV_X + 34 + i*56; }
 }
 
 /* ===================================================================
@@ -499,16 +562,15 @@ Btn homeBtns2[2] = {
 uint32_t lastStudsShown = 0xFFFFFFFF;
 int lastLevelShown = -1;
 
+bool onAvatar(const UiEvent &ev){
+  return ev.x>=AV_X && ev.x<=AV_X+AV_W && ev.y>=AV_TOP && ev.y<=AV_TOP+AV_H;
+}
+
 void drawHomeStatic() {
   gfx->fillScreen(C_BLACK);
-  // top HUD
-  textC("ALON", LCD_W / 2, 40, 3, THEMES[pet.equipped].accent);
   lastStudsShown = 0xFFFFFFFF; lastLevelShown = -1;
   for (int i = 0; i < 4; i++) lastBar[i] = -1;
-  // avatar
-  int face = pet.sleeping ? 2 : (pet.fun > 55 && pet.hunger > 40 ? 1 : (pet.hunger < 25 || pet.clean < 25 ? 4 : 0));
-  drawAvatar(face, LCD_W / 2, 150, 95);
-  // buttons
+  drawAvatarStatic();                       // real LEGO avatar image
   Btn *all[] = {&homeBtns[0], &homeBtns[1], &homeBtns2[0], &homeBtns2[1]};
   for (int i = 0; i < 4; i++) {
     Btn *b = all[i];
@@ -516,40 +578,35 @@ void drawHomeStatic() {
     gfx->drawRoundRect(b->x, b->y, b->w, b->h, 12, THEMES[pet.equipped].accent);
     textC(b->label, b->x + b->w / 2, b->y + b->h / 2, 2, C_WHITE);
   }
-  textC("swipe up: games   hold face: agent", LCD_W/2, 404, 1, C_GREY);
+  textC("tap face to pet   hold: agent", LCD_W/2, 388, 1, C_GREY);
 }
 
 void drawHomeDynamic() {
-  // studs + level line
   if (pet.studs != lastStudsShown || pet.level != lastLevelShown) {
     lastStudsShown = pet.studs; lastLevelShown = pet.level;
-    gfx->fillRect(60, 62, LCD_W - 120, 20, C_BLACK);
+    gfx->fillRect(40, 10, LCD_W - 80, 20, C_BLACK);
     char buf[40];
     snprintf(buf, sizeof(buf), "Lv %d   %lu studs", pet.level, (unsigned long)pet.studs);
-    textC(buf, LCD_W / 2, 72, 2, C_CYAN);
+    textC(buf, LCD_W / 2, 20, 2, C_CYAN);
   }
-  // 4 stat bars in two columns under avatar
-  drawStatBar(0, "HUNGER", pet.hunger, 70, 224, 150);
-  drawStatBar(1, "ENERGY", pet.energy, 246, 224, 150);
-  // (clean/fun live on the STATS screen to keep home uncluttered)
+  drawStatBar(0, "HUNGER", pet.hunger, 70, 240, 150);
+  drawStatBar(1, "ENERGY", pet.energy, 246, 240, 150);
 }
 
 void handleHome(const UiEvent &ev) {
   Btn *all[] = {&homeBtns[0], &homeBtns[1], &homeBtns2[0], &homeBtns2[1]};
   if (ev.type == EV_DOWN) {
-    // avatar tap zone -> pet him (fun up)
-    int dxp = ev.x - LCD_W/2, dyp = ev.y - 150;
-    if (dxp*dxp + dyp*dyp < 95*95) {
+    if (onAvatar(ev)) {                     // pet him
       pet.fun = clampi(pet.fun + 6, 0, 100);
       reward(1, 3);
-      screenDirty = true; saveState();
+      triggerPet(); saveState();
       return;
     }
     for (int i = 0; i < 4; i++) {
       Btn *b = all[i];
       if (ev.x >= b->x && ev.x <= b->x + b->w && ev.y >= b->y && ev.y <= b->y + b->h) {
         if (!strcmp(b->label, "CARE")) screen = SCR_CARE;
-        else if (!strcmp(b->label, "PLAY")) { pet.fun = clampi(pet.fun+8,0,100); pet.energy = clampi(pet.energy-4,0,100); reward(2,5); saveState(); screenDirty=true; }
+        else if (!strcmp(b->label, "PLAY")) { pet.fun = clampi(pet.fun+8,0,100); pet.energy = clampi(pet.energy-4,0,100); reward(2,5); saveState(); }
         else if (!strcmp(b->label, "SHOP")) screen = SCR_SHOP;
         else if (!strcmp(b->label, "Zzz"))  { pet.sleeping = !pet.sleeping; gfx->setBrightness(pet.sleeping?30:140); }
         screenDirty = true;
@@ -557,8 +614,7 @@ void handleHome(const UiEvent &ev) {
       }
     }
   } else if (ev.type == EV_HOLD) {
-    int dxp = ev.x - LCD_W/2, dyp = ev.y - 150;
-    if (dxp*dxp + dyp*dyp < 110*110) { screen = SCR_AGENT; screenDirty = true; }
+    if (onAvatar(ev)) { screen = SCR_AGENT; screenDirty = true; }
   } else if (ev.type == EV_SWIPE_U) { screen = SCR_GAMES; screenDirty = true; }
   else if (ev.type == EV_SWIPE_L) { screen = SCR_STATS; screenDirty = true; }
   else if (ev.type == EV_SWIPE_R) { screen = SCR_STATS; screenDirty = true; }
@@ -678,7 +734,7 @@ uint32_t agentAnim=0;
 void drawAgentStatic(){
   gfx->fillScreen(C_BLACK);
   textC("AGENT", LCD_W/2, 46, 3, THEMES[pet.equipped].accent);
-  drawAvatar(3, LCD_W/2, 180, 95);
+  gfx->draw16bitRGBBitmap((466-ALON_AV_W)/2, 95, img_agent, ALON_AV_W, ALON_AV_H);
   textC("listening...", LCD_W/2, 300, 2, C_CYAN);
   drawBackBtn();
 }
@@ -999,7 +1055,7 @@ void loop(){
 
   // per-screen animation / ticking
   switch(screen){
-    case SCR_HOME:  drawHomeDynamic(); break;
+    case SCR_HOME:  drawHomeDynamic(); animateAvatar(); break;
     case SCR_AGENT: drawAgentDynamic();break;
     case SCR_SNAKE: stepSnake();       break;
     case SCR_MOLE:  stepMole();        break;

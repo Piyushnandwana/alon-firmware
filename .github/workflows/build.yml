@@ -1,5 +1,9 @@
 name: Build Alon firmware
 
+# Builds the Alon sketch into a single flashable .bin in the cloud.
+# Works whether Alon.ino sits at the repo root or inside an Alon/ folder.
+# After it runs, download the .bin from the run's "Artifacts".
+
 on:
   push:
     branches: [ main, master ]
@@ -38,6 +42,9 @@ jobs:
           else
             echo "Could not find Alon.ino at the repo root or in Alon/."; ls -la; exit 1
           fi
+          # copy any companion headers (e.g. the avatar images) next to the sketch
+          for h in *.h Alon/*.h; do [ -f "$h" ] && cp "$h" sketchdir/Alon/ || true; done
+          echo "sketch folder:"; ls -l sketchdir/Alon/
 
       - name: Compile
         run: |
