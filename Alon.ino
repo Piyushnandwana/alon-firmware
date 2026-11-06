@@ -478,17 +478,12 @@ void drawAvatar(int face, int cx, int cy, int scale /*percent 100=normal*/) {
 
 /* celebration splash on level up */
 void celebrate() {
-  gfx->fillScreen(C_BLACK);
-  gfx->draw16bitRGBBitmap((466-ALON_AV_W)/2, 150, img_celebration, ALON_AV_W, ALON_AV_H);
+  gfx->draw16bitRGBBitmap(0, 0, img_celebration, 466, 466);   // full-screen render
   char buf[24]; snprintf(buf, sizeof(buf), "LEVEL %d!", pet.level);
-  textC(buf, LCD_W / 2, 90, 3, THEMES[pet.equipped].accent);
-  textC("+20 studs", LCD_W / 2, 360, 2, C_WHITE);
-  // confetti sparkles
-  for (int i = 0; i < 40; i++) {
-    int a = esp_random()%360; int rr = 150 + esp_random()%70;
-    int x = 233 + (int)(rr*cosf(a*0.0174f)), y = 233 + (int)(rr*sinf(a*0.0174f));
-    gfx->fillCircle(x, y, 2, (i&1)?THEMES[pet.equipped].accent:C_YELLOW);
-  }
+  gfx->fillRect(60, 24, 346, 30, C_BLACK);
+  textC(buf, LCD_W / 2, 38, 3, THEMES[pet.equipped].accent);
+  gfx->fillRect(130, 420, 206, 24, C_BLACK);
+  textC("+20 studs", LCD_W / 2, 432, 2, C_WHITE);
   delay(1400);
   screenDirty = true;
 }
@@ -514,56 +509,28 @@ void drawStatBar(int idx, const char *label, int val, int x, int y, int w) {
    Draws Alon's face with squash/stretch, blinking, and a pet reaction
    (bounce + happy eyes + rising hearts). Only the avatar box is redrawn.
    =================================================================== */
-#define AV_W   ALON_AV_W            // 180
-#define AV_H   ALON_AV_H            // 171
-#define AV_X   ((466-AV_W)/2)       // 143  (centered)
-#define AV_TOP 60                   // avatar top edge
-#define AVBOX_X (AV_X-4)
-#define AVBOX_Y (AV_TOP-16)
-#define AVBOX_W (AV_W+8)
-#define AVBOX_H (AV_H+22)
-
+// The avatar now fills the whole 466x466 screen (full artwork, uncropped).
 bool     petAnimOn = false;
 uint32_t petAnimStart = 0;
-uint32_t lastAvatarDraw = 0;
-struct Heart { bool on; int x; } hearts[3];
 
-void drawHeart(int cx,int cy,int s,uint16_t col){
-  gfx->fillCircle(cx-s/2, cy, s/2, col);
-  gfx->fillCircle(cx+s/2, cy, s/2, col);
-  gfx->fillTriangle(cx-s, cy, cx+s, cy, cx, cy+s+s/3, col);
+const uint16_t* homeImg(){ return pet.sleeping ? img_sleep : img_idle; }
+void blitFull(const uint16_t* img){ gfx->draw16bitRGBBitmap(0, 0, img, 466, 466); }
+
+// Tapping Alon shows his celebration render (arms up, fireworks) for a beat,
+// then returns to the idle image - his reaction to being petted.
+void triggerPet(){
+  petAnimOn = true; petAnimStart = millis();
+  blitFull(img_celebration);
+  // a few hearts on top for extra pop
+  for(int i=0;i<4;i++) {
+    gfx->fillCircle(150+i*55, 120, 7, C_RED);
+    gfx->fillCircle(164+i*55, 120, 7, C_RED);
+    gfx->fillTriangle(143+i*55,122, 171+i*55,122, 157+i*55,140, C_RED);
+  }
 }
-
-const uint16_t* avatarIdleImg(){ return pet.sleeping ? img_sleep : img_idle; }
-
-// Blit the resting avatar (idle, or sleep when napping).
-void drawAvatarStatic(){
-  gfx->fillRect(AVBOX_X, AVBOX_Y, AVBOX_W, AVBOX_H, C_BLACK);
-  gfx->draw16bitRGBBitmap(AV_X, AV_TOP, avatarIdleImg(), AV_W, AV_H);
-}
-
-// Pet reaction: the celebration render bounces while hearts rise (~850ms),
-// then settles back to the idle image. Called every home loop.
 void animateAvatar(){
   if(!petAnimOn) return;
-  uint32_t now = millis();
-  if(now - lastAvatarDraw < 45) return;
-  lastAvatarDraw = now;
-  int age = now - petAnimStart;
-  if(age >= 850){ petAnimOn = false; drawAvatarStatic(); return; }
-  float t = age/850.0f;
-  int yoff = -(int)(16*sinf(t*3.14159f));           // little hop
-  gfx->fillRect(AVBOX_X, AVBOX_Y, AVBOX_W, AVBOX_H, C_BLACK);
-  gfx->draw16bitRGBBitmap(AV_X, AV_TOP+yoff, img_celebration, AV_W, AV_H);
-  int rise = age*52/850;
-  for(int i=0;i<3;i++) if(hearts[i].on)
-    drawHeart(hearts[i].x, AV_TOP+70 - rise - i*8, 7, C_RED);
-}
-
-// Trigger the pet reaction the instant the face is tapped.
-void triggerPet(){
-  petAnimOn = true; petAnimStart = millis(); lastAvatarDraw = 0;
-  for(int i=0;i<3;i++){ hearts[i].on = true; hearts[i].x = AV_X + 34 + i*56; }
+  if(millis()-petAnimStart > 900){ petAnimOn = false; screenDirty = true; }  // back to home
 }
 
 /* ===================================================================
@@ -586,71 +553,59 @@ Btn homeBtns2[2] = {
 uint32_t lastStudsShown = 0xFFFFFFFF;
 int lastLevelShown = -1;
 
-bool onAvatar(const UiEvent &ev){
-  return ev.x>=AV_X && ev.x<=AV_X+AV_W && ev.y>=AV_TOP && ev.y<=AV_TOP+AV_H;
+void miniBar(int val,int x,int y,int w){
+  val=clampi(val,0,100);
+  gfx->fillRoundRect(x,y,w,10,4,C_DIMGREY);
+  uint16_t c=val>50?C_GREEN:(val>25?C_YELLOW:C_RED);
+  int fw=(w-2)*val/100; gfx->fillRoundRect(x+1,y+1,fw<3?3:fw,8,3,c);
 }
 
 void drawHomeStatic() {
-  gfx->fillScreen(C_BLACK);
+  blitFull(homeImg());                       // full-screen LEGO avatar art
+  gfx->fillRect(0, 0, 466, 30, C_BLACK);     // top HUD backing (over dark rim)
+  gfx->fillRect(0, 432, 466, 34, C_BLACK);   // bottom HUD backing
   lastStudsShown = 0xFFFFFFFF; lastLevelShown = -1;
-  for (int i = 0; i < 4; i++) lastBar[i] = -1;
-  drawAvatarStatic();                       // real LEGO avatar image
-  Btn *all[] = {&homeBtns[0], &homeBtns[1], &homeBtns2[0], &homeBtns2[1]};
-  for (int i = 0; i < 4; i++) {
-    Btn *b = all[i];
-    gfx->fillRoundRect(b->x, b->y, b->w, b->h, 12, C_DIMGREY);
-    gfx->drawRoundRect(b->x, b->y, b->w, b->h, 12, THEMES[pet.equipped].accent);
-    textC(b->label, b->x + b->w / 2, b->y + b->h / 2, 2, C_WHITE);
-  }
-  textC("tap:pet  hold:agent  swipe down:settings", LCD_W/2, 388, 1, C_GREY);
+  textC("L:care  R:shop  U:games  D:settings", LCD_W/2, 458, 1, C_GREY);
 }
 
 void drawHomeDynamic() {
+  if (petAnimOn) return;                      // don't draw HUD over the reaction
   static uint32_t lastClk=0, lastBatMs=0;
   static int hh=-1, mm=-1, bat=-1, lastMin=-2, lastBat=-2;
+  static int lastH=-1, lastE=-1;
   uint32_t now=millis();
   if (rtcOK && now-lastClk>1000){ lastClk=now; RTC_DateTime t=rtc.getDateTime(); hh=t.getHour(); mm=t.getMinute(); }
   if (now-lastBatMs>5000 || lastBat==-2){ lastBatMs=now; bat=batteryPercent(); }
 
   if (mm!=lastMin || bat!=lastBat || pet.studs!=lastStudsShown || pet.level!=lastLevelShown){
     lastMin=mm; lastBat=bat; lastStudsShown=pet.studs; lastLevelShown=pet.level;
-    gfx->fillRect(18, 6, LCD_W-36, 38, C_BLACK);
+    gfx->fillRect(0, 2, 466, 26, C_BLACK);
     char c[8]; if(hh>=0) snprintf(c,sizeof(c),"%02d:%02d",hh,mm); else snprintf(c,sizeof(c),"--:--");
-    textL(c, 34, 10, 2, C_CYAN);
+    textL(c, 20, 8, 2, C_CYAN);
     char bb[8]; if(bat>=0) snprintf(bb,sizeof(bb),"%d%%",bat); else snprintf(bb,sizeof(bb),"--");
-    int bw=strlen(bb)*12; textL(bb, LCD_W-34-bw, 10, 2, (bat>=0&&bat<20)?C_RED:C_GREEN);
-    char buf[40]; snprintf(buf,sizeof(buf),"Lv %d  %lu studs", pet.level,(unsigned long)pet.studs);
-    textC(buf, LCD_W/2, 34, 2, C_CYAN);
+    int bw=strlen(bb)*12; textL(bb, LCD_W-20-bw, 8, 2, (bat>=0&&bat<20)?C_RED:C_GREEN);
+    char buf[32]; snprintf(buf,sizeof(buf),"Lv%d  %lu studs", pet.level,(unsigned long)pet.studs);
+    textC(buf, LCD_W/2, 14, 2, C_YELLOW);
   }
-  drawStatBar(0, "HUNGER", pet.hunger, 70, 240, 150);
-  drawStatBar(1, "ENERGY", pet.energy, 246, 240, 150);
+  if (pet.hunger!=lastH || pet.energy!=lastE){
+    lastH=pet.hunger; lastE=pet.energy;
+    gfx->fillRect(0,434,466,20,C_BLACK);
+    textL("H",26,438,1,C_GREY); miniBar(pet.hunger,40,436,170);
+    textL("E",238,438,1,C_GREY); miniBar(pet.energy,252,436,170);
+  }
 }
 
 void handleHome(const UiEvent &ev) {
-  Btn *all[] = {&homeBtns[0], &homeBtns[1], &homeBtns2[0], &homeBtns2[1]};
-  if (ev.type == EV_DOWN) {
-    if (onAvatar(ev)) {                     // pet him
-      pet.fun = clampi(pet.fun + 6, 0, 100);
-      reward(1, 3);
-      triggerPet(); saveState();
-      return;
-    }
-    for (int i = 0; i < 4; i++) {
-      Btn *b = all[i];
-      if (ev.x >= b->x && ev.x <= b->x + b->w && ev.y >= b->y && ev.y <= b->y + b->h) {
-        if (!strcmp(b->label, "CARE")) screen = SCR_CARE;
-        else if (!strcmp(b->label, "PLAY")) { pet.fun = clampi(pet.fun+8,0,100); pet.energy = clampi(pet.energy-4,0,100); reward(2,5); saveState(); }
-        else if (!strcmp(b->label, "SHOP")) screen = SCR_SHOP;
-        else if (!strcmp(b->label, "Zzz"))  { pet.sleeping = !pet.sleeping; gfx->setBrightness(pet.sleeping?30:140); }
-        screenDirty = true;
-        return;
-      }
-    }
-  } else if (ev.type == EV_HOLD) {
-    if (onAvatar(ev)) { screen = SCR_AGENT; screenDirty = true; }
-  } else if (ev.type == EV_SWIPE_U) { screen = SCR_GAMES; screenDirty = true; }
-  else if (ev.type == EV_SWIPE_L) { screen = SCR_STATS; screenDirty = true; }
-  else if (ev.type == EV_SWIPE_R) { screen = SCR_STATS; screenDirty = true; }
+  bool central = (ev.y>=44 && ev.y<=424);     // avatar area (not the HUD strips)
+  if (ev.type == EV_TAP && central) {         // tap = pet
+    pet.fun = clampi(pet.fun + 6, 0, 100);
+    reward(1, 3);
+    triggerPet(); saveState();
+  }
+  else if (ev.type == EV_HOLD && central) { screen = SCR_AGENT; screenDirty = true; }
+  else if (ev.type == EV_SWIPE_L) { screen = SCR_CARE;     screenDirty = true; }
+  else if (ev.type == EV_SWIPE_R) { screen = SCR_SHOP;     screenDirty = true; }
+  else if (ev.type == EV_SWIPE_U) { screen = SCR_GAMES;    screenDirty = true; }
   else if (ev.type == EV_SWIPE_D) { screen = SCR_SETTINGS; screenDirty = true; }
 }
 
@@ -766,27 +721,19 @@ void handleStats(const UiEvent &ev){
    =================================================================== */
 uint32_t agentAnim=0;
 void drawAgentStatic(){
-  gfx->fillScreen(C_BLACK);
-  textC("AGENT", LCD_W/2, 46, 3, THEMES[pet.equipped].accent);
-  gfx->draw16bitRGBBitmap((466-ALON_AV_W)/2, 95, img_agent, ALON_AV_W, ALON_AV_H);
-  textC("listening...", LCD_W/2, 300, 2, C_CYAN);
+  blitFull(img_agent);                        // full-screen agent render (has its own aura)
+  gfx->fillRect(0, 0, 466, 28, C_BLACK);
+  textC("AGENT  -  listening...", LCD_W/2, 13, 2, C_CYAN);
   drawBackBtn();
 }
 void drawAgentDynamic(){
   uint32_t now=millis();
-  if (now-agentAnim<70) return; agentAnim=now;
-  // pulsing aura
-  static int ph=0; ph=(ph+1)%3;
+  if (now-agentAnim<80) return; agentAnim=now;
   Theme &th=THEMES[pet.equipped];
-  for (int i=0;i<3;i++){
-    uint16_t c = (i==ph)? th.accent : C_BLACK;
-    gfx->drawCircle(LCD_W/2,180, 112+i*8, c);
-  }
-  // simulated mic level bar
-  int lvl = 20 + (esp_random()%60);
-  gfx->fillRect(103,330,260,16,C_BLACK);
-  gfx->fillRoundRect(103,330,260*lvl/100,16,5,th.accent);
-  gfx->drawRoundRect(103,330,260,16,5,C_DIMGREY);
+  int lvl = 20 + (esp_random()%60);           // simulated mic level (real mic = WiFi phase)
+  gfx->fillRect(103,408,260,16,C_BLACK);
+  gfx->fillRoundRect(103,408,260*lvl/100,16,5,th.accent);
+  gfx->drawRoundRect(103,408,260,16,5,C_DIMGREY);
 }
 void handleAgent(const UiEvent &ev){
   if (isSwipe(ev) || hitBack(ev)){ screen=SCR_HOME; screenDirty=true; }
@@ -833,7 +780,10 @@ void drawSettings(){
   char mb[6]; snprintf(mb,sizeof(mb),"%02d",mm);  textC(mb,318,204,2,C_CYAN);
   gfx->fillRoundRect(336,186,34,36,8,C_DIMGREY); textC("+",353,204,2,C_WHITE);
   // Reset pet
-  gfx->fillRoundRect(133,246,200,42,10,C_RED); textC("RESET PET",233,267,2,C_WHITE);
+  // Stats + Sleep toggle
+  gfx->fillRoundRect(96,240,120,40,10,C_DIMGREY); textC("STATS",156,260,2,C_WHITE);
+  gfx->fillRoundRect(250,240,120,40,10,C_DIMGREY); textC(pet.sleeping?"WAKE":"SLEEP",310,260,2,C_WHITE);
+  gfx->fillRoundRect(133,292,200,38,10,C_RED); textC("RESET PET",233,311,2,C_WHITE);
   drawBackBtn();
 }
 void handleSettings(const UiEvent &ev){
@@ -850,7 +800,11 @@ void handleSettings(const UiEvent &ev){
     if(x>=254&&x<=288){ bumpTime(0,-1); screenDirty=true; return; }
     if(x>=336&&x<=370){ bumpTime(0,+1); screenDirty=true; return; }
   }
-  if(x>=133&&x<=333&&y>=246&&y<=288){ resetPet(); screenDirty=true; return; }
+  if(y>=240&&y<=280){
+    if(x>=96 &&x<=216){ screen=SCR_STATS; screenDirty=true; return; }
+    if(x>=250&&x<=370){ pet.sleeping=!pet.sleeping; gfx->setBrightness(pet.sleeping?30:brightness); saveState(); screenDirty=true; return; }
+  }
+  if(x>=133&&x<=333&&y>=292&&y<=330){ resetPet(); screenDirty=true; return; }
 }
 
 /* ===================================================================
