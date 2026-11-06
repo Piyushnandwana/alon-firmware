@@ -609,7 +609,7 @@ void drawHomeDynamic() {
   static uint32_t lastClk=0, lastBatMs=0;
   static int hh=-1, mm=-1, bat=-1, lastMin=-2, lastBat=-2;
   uint32_t now=millis();
-  if (rtcOK && now-lastClk>1000){ lastClk=now; RTC_DateTime t=rtc.getDateTime(); hh=t.hour; mm=t.minute; }
+  if (rtcOK && now-lastClk>1000){ lastClk=now; RTC_DateTime t=rtc.getDateTime(); hh=t.getHour(); mm=t.getMinute(); }
   if (now-lastBatMs>5000 || lastBat==-2){ lastBatMs=now; bat=batteryPercent(); }
 
   if (mm!=lastMin || bat!=lastBat || pet.studs!=lastStudsShown || pet.level!=lastLevelShown){
@@ -800,10 +800,10 @@ void saveBright(){ prefs.begin("alon",false); prefs.putInt("bri",brightness); pr
 void bumpTime(int dh,int dm){
   if(!rtcOK) return;
   RTC_DateTime t = rtc.getDateTime();
-  int hh=((int)t.hour+dh+24)%24, mm=((int)t.minute+dm+60)%60;
-  int yr=(t.year>=2020&&t.year<2100)?t.year:2026;
-  int mo=(t.month>=1&&t.month<=12)?t.month:1;
-  int dy=(t.day>=1&&t.day<=31)?t.day:1;
+  int hh=((int)t.getHour()+dh+24)%24, mm=((int)t.getMinute()+dm+60)%60;
+  int yr=(t.getYear()>=2020&&t.getYear()<2100)?t.getYear():2026;
+  int mo=(t.getMonth()>=1&&t.getMonth()<=12)?t.getMonth():1;
+  int dy=(t.getDay()>=1&&t.getDay()<=31)?t.getDay():1;
   rtc.setDateTime(RTC_DateTime(yr,mo,dy,hh,mm,0));
 }
 
@@ -823,7 +823,7 @@ void drawSettings(){
   char b[8]; snprintf(b,sizeof(b),"%d",brightness); textC(b,233,126,2,C_CYAN);
   gfx->fillRoundRect(302,106,44,40,10,C_DIMGREY); textC("+",324,126,3,C_WHITE);
   // Clock
-  int hh=0,mm=0; if(rtcOK){ RTC_DateTime t=rtc.getDateTime(); hh=t.hour; mm=t.minute; }
+  int hh=0,mm=0; if(rtcOK){ RTC_DateTime t=rtc.getDateTime(); hh=t.getHour(); mm=t.getMinute(); }
   textC(rtcOK?"Clock":"Clock (no RTC)", 233, 168, 2, C_WHITE);
   gfx->fillRoundRect(96,186,34,36,8,C_DIMGREY);  textC("-",113,204,2,C_WHITE);
   char hb[6]; snprintf(hb,sizeof(hb),"%02d",hh);  textC(hb,160,204,2,C_CYAN);
