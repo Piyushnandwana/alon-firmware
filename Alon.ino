@@ -294,34 +294,27 @@ inline bool isSwipe(const UiEvent &e) {
 UiEvent pollGesture() {
   UiEvent ev;
   uint32_t now = millis();
-  bool due = tpPending || g.down || contactN > 0 || (now - lastPollMs >= TP_HEARTBEAT);
+  bool due = tpPending || g.down || (now - lastPollMs >= 40);
   if (!due) return ev;
   tpPending = false;
   lastPollMs = now;
 
   int x, y;
-  int n = readTouch(x, y);
-  bool present = (n > 0);
+  bool present = (readTouch(x, y) > 0);
   bool cooling = (now < inputCooldownUntil);
 
   if (present) {
-    absentN = 0;
-    if (g.down) {                                   // noise spike guard
-      int step = abs(x - g.curX) + abs(y - g.curY);
-      if (step > JUMP_MAX) { g.lastSeen = now; return ev; }
-    }
-    contactN++;
-    if (!g.down) {
-      if (contactN >= DOWN_CONFIRM) {               // confirmed finger-down
-        g.down = true; g.swiped = g.held = false;
-        g.downX = g.curX = x; g.downY = g.curY = y;
-        g.downMs = now; g.lastSeen = now;
-        if (!cooling) { ev.type = EV_DOWN; ev.x = x; ev.y = y; dbgEv = "down"; }
-      }
+    if (!g.down) {                        // first contact = down immediately
+      g.down = true; g.swiped = g.held = false;
+      g.downX = g.curX = x; g.downY = g.curY = y;
+      g.downMs = g.lastSeen = now;
+      if (!cooling) { ev.type = EV_DOWN; ev.x = x; ev.y = y; dbgEv = "down"; }
       return ev;
     }
-    g.curX = x; g.curY = y; g.lastSeen = now;
-    int dx = x - g.downX, dy = y - g.downY;
+    // reject single noisy jumps; otherwise track the finger
+    if (abs(x - g.curX) + abs(y - g.curY) <= JUMP_MAX) { g.curX = x; g.curY = y; }
+    g.lastSeen = now;
+    int dx = g.curX - g.downX, dy = g.curY - g.downY;
     if (!g.swiped && !g.held && !cooling) {
       if (abs(dx) >= SWIPE_THRESH || abs(dy) >= SWIPE_THRESH) {
         g.swiped = true;
@@ -329,20 +322,17 @@ UiEvent pollGesture() {
         else                   { ev.type = (dy > 0) ? EV_SWIPE_D : EV_SWIPE_U; dbgEv = (dy > 0) ? "swD" : "swU"; }
         return ev;
       }
-      if (now - g.downMs >= HOLD_MS) { g.held = true; ev.type = EV_HOLD; ev.x = x; ev.y = y; dbgEv = "hold"; return ev; }
+      if (now - g.downMs >= HOLD_MS) { g.held = true; ev.type = EV_HOLD; ev.x = g.curX; ev.y = g.curY; dbgEv = "hold"; return ev; }
     }
   } else {
-    contactN = 0;
-    if (g.down) {
-      absentN++;
-      if (absentN >= UP_CONFIRM) {                  // confirmed lift
-        bool wasTap = (!g.swiped && !g.held &&
-                       abs(g.curX - g.downX) < TAP_SLOP &&
-                       abs(g.curY - g.downY) < TAP_SLOP &&
-                       (now - g.downMs) >= 30);
-        g.down = false; absentN = 0;
-        if (wasTap && !cooling) { ev.type = EV_TAP; ev.x = g.downX; ev.y = g.downY; dbgEv = "tap"; }
-      }
+    // end the gesture only after the finger has really been gone (tolerates flicker)
+    if (g.down && (now - g.lastSeen >= 120)) {
+      bool wasTap = (!g.swiped && !g.held &&
+                     abs(g.curX - g.downX) < TAP_SLOP &&
+                     abs(g.curY - g.downY) < TAP_SLOP &&
+                     (now - g.downMs) >= 25);
+      g.down = false;
+      if (wasTap && !cooling) { ev.type = EV_TAP; ev.x = g.downX; ev.y = g.downY; dbgEv = "tap"; }
     }
   }
   return ev;
@@ -597,10 +587,7 @@ void miniBar(int val,int x,int y,int w){
 
 void drawHomeStatic() {
   blitFull(homeImg());                       // full-screen LEGO avatar art
-  gfx->fillRect(0, 0, 466, 30, C_BLACK);     // top HUD backing (over dark rim)
-  gfx->fillRect(0, 432, 466, 34, C_BLACK);   // bottom HUD backing
   lastStudsShown = 0xFFFFFFFF; lastLevelShown = -1;
-  textC("L:care  R:shop  U:apps  D:settings", LCD_W/2, 458, 1, C_GREY);
 }
 
 void drawHomeDynamic() {
@@ -612,21 +599,23 @@ void drawHomeDynamic() {
   if (rtcOK && now-lastClk>1000){ lastClk=now; RTC_DateTime t=rtc.getDateTime(); hh=t.getHour(); mm=t.getMinute(); }
   if (now-lastBatMs>5000 || lastBat==-2){ lastBatMs=now; bat=batteryPercent(); }
 
+  // Top HUD (kept inside the visible circle, near centre-top)
   if (mm!=lastMin || bat!=lastBat || pet.studs!=lastStudsShown || pet.level!=lastLevelShown){
     lastMin=mm; lastBat=bat; lastStudsShown=pet.studs; lastLevelShown=pet.level;
-    gfx->fillRect(0, 2, 466, 26, C_BLACK);
+    gfx->fillRoundRect(96, 26, 274, 56, 12, C_BLACK);
     char c[8]; if(hh>=0) snprintf(c,sizeof(c),"%02d:%02d",hh,mm); else snprintf(c,sizeof(c),"--:--");
-    textL(c, 20, 8, 2, C_CYAN);
+    textC(c, 160, 44, 2, C_CYAN);
     char bb[8]; if(bat>=0) snprintf(bb,sizeof(bb),"%d%%",bat); else snprintf(bb,sizeof(bb),"--");
-    int bw=strlen(bb)*12; textL(bb, LCD_W-20-bw, 8, 2, (bat>=0&&bat<20)?C_RED:C_GREEN);
+    textC(bb, 312, 44, 2, (bat>=0&&bat<20)?C_RED:C_GREEN);
     char buf[32]; snprintf(buf,sizeof(buf),"Lv%d  %lu studs", pet.level,(unsigned long)pet.studs);
-    textC(buf, LCD_W/2, 14, 2, C_YELLOW);
+    textC(buf, 233, 68, 2, C_YELLOW);
   }
+  // Bottom HUD: hunger/energy (inside the visible circle)
   if (pet.hunger!=lastH || pet.energy!=lastE){
     lastH=pet.hunger; lastE=pet.energy;
-    gfx->fillRect(0,434,466,20,C_BLACK);
-    textL("H",26,438,1,C_GREY); miniBar(pet.hunger,40,436,170);
-    textL("E",238,438,1,C_GREY); miniBar(pet.energy,252,436,170);
+    gfx->fillRoundRect(78, 400, 310, 28, 8, C_BLACK);
+    textL("H",86,407,1,C_GREY); miniBar(pet.hunger,102,405,122);
+    textL("E",240,407,1,C_GREY); miniBar(pet.energy,256,405,122);
   }
 }
 
@@ -1299,7 +1288,7 @@ void setup(){
   // ---- I2C (shared bus, 400kHz as the board BSP requires) ----
   Wire.begin(IIC_SDA, IIC_SCL);
   Wire.setClock(400000);
-  Wire.setTimeOut(25);        // never let a stuck I2C read freeze the loop
+  Wire.setTimeOut(50);        // never let a stuck I2C read freeze the loop
 
   // ---- Display ----
   if(!gfx->begin()){ Serial.println("gfx begin failed"); }
