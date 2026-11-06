@@ -45,6 +45,7 @@
 #include "Arduino_GFX_Library.h"
 #include "TouchDrvCSTXXX.hpp"
 #include "SensorQMI8658.hpp"
+#include "SensorPCF85063.hpp"   // onboard real-time clock
 #include "img_alon.h"           // real LEGO avatar images (idle/sleep/agent/celebration)
 
 /* ----------------------- BOARD PIN MAP ------------------------------ */
@@ -83,7 +84,27 @@ TouchDrvCST92xx touch;
 SensorQMI8658   imu;
 bool imuOK = false;
 
+SensorPCF85063  rtc;
+bool rtcOK = false;
+
+#define BOOT_BTN 0             // SHORT side button = BOOT (GPIO0, active low)
+#define RTC_ADDR 0x51
+#define PMU_ADDR 0x34          // AXP2101 power chip
+
+int  brightness = 140;         // 20..250, saved in NVS
+bool bootPrev = true;          // BOOT button previous level (pulled up = high)
+
 Preferences prefs;
+
+// Battery % read straight from the AXP2101 gauge register (no extra lib).
+int batteryPercent(){
+  Wire.beginTransmission(PMU_ADDR);
+  Wire.write(0xA4);
+  if(Wire.endTransmission(false)!=0) return -1;
+  if(Wire.requestFrom(PMU_ADDR,1)!=1) return -1;
+  int p = Wire.read();
+  return (p>=0 && p<=100) ? p : -1;
+}
 
 /* ----------------------- COLOR / THEME ------------------------------ */
 // The AMOLED is true black: black pixels are off.
@@ -132,7 +153,7 @@ void reward(uint32_t studs, uint32_t xp);
 /* ----------------------- SCREENS ------------------------------------ */
 enum Screen {
   SCR_HOME, SCR_CARE, SCR_SHOP, SCR_GAMES, SCR_STATS, SCR_AGENT,
-  SCR_SNAKE, SCR_MOLE, SCR_2048
+  SCR_SNAKE, SCR_MOLE, SCR_2048, SCR_SETTINGS
 };
 Screen screen = SCR_HOME;
 bool    screenDirty = true;   // force a full redraw of the current screen
@@ -175,6 +196,7 @@ void handleMole (const UiEvent &ev);
 void handle2048 (const UiEvent &ev);
 bool hitBack    (const UiEvent &ev);
 bool onAvatar   (const UiEvent &ev);
+void handleSettings(const UiEvent &ev);
 
 #ifndef TOUCH_DEBUG
 #define TOUCH_DEBUG 0       // 1 = show a live touch readout at the bottom
@@ -390,6 +412,7 @@ void loadState() {
   pet.level  = prefs.getInt("level",  1);
   pet.ownedMask = prefs.getUChar("owned", 0x01);
   pet.equipped  = prefs.getUChar("equip", 0);
+  brightness    = prefs.getInt("bri", 140);
   prefs.end();
 }
 
@@ -579,16 +602,25 @@ void drawHomeStatic() {
     gfx->drawRoundRect(b->x, b->y, b->w, b->h, 12, THEMES[pet.equipped].accent);
     textC(b->label, b->x + b->w / 2, b->y + b->h / 2, 2, C_WHITE);
   }
-  textC("tap face to pet   hold: agent", LCD_W/2, 388, 1, C_GREY);
+  textC("tap:pet  hold:agent  swipe down:settings", LCD_W/2, 388, 1, C_GREY);
 }
 
 void drawHomeDynamic() {
-  if (pet.studs != lastStudsShown || pet.level != lastLevelShown) {
-    lastStudsShown = pet.studs; lastLevelShown = pet.level;
-    gfx->fillRect(40, 10, LCD_W - 80, 20, C_BLACK);
-    char buf[40];
-    snprintf(buf, sizeof(buf), "Lv %d   %lu studs", pet.level, (unsigned long)pet.studs);
-    textC(buf, LCD_W / 2, 20, 2, C_CYAN);
+  static uint32_t lastClk=0, lastBatMs=0;
+  static int hh=-1, mm=-1, bat=-1, lastMin=-2, lastBat=-2;
+  uint32_t now=millis();
+  if (rtcOK && now-lastClk>1000){ lastClk=now; RTC_DateTime t=rtc.getDateTime(); hh=t.hour; mm=t.minute; }
+  if (now-lastBatMs>5000 || lastBat==-2){ lastBatMs=now; bat=batteryPercent(); }
+
+  if (mm!=lastMin || bat!=lastBat || pet.studs!=lastStudsShown || pet.level!=lastLevelShown){
+    lastMin=mm; lastBat=bat; lastStudsShown=pet.studs; lastLevelShown=pet.level;
+    gfx->fillRect(18, 6, LCD_W-36, 38, C_BLACK);
+    char c[8]; if(hh>=0) snprintf(c,sizeof(c),"%02d:%02d",hh,mm); else snprintf(c,sizeof(c),"--:--");
+    textL(c, 34, 10, 2, C_CYAN);
+    char bb[8]; if(bat>=0) snprintf(bb,sizeof(bb),"%d%%",bat); else snprintf(bb,sizeof(bb),"--");
+    int bw=strlen(bb)*12; textL(bb, LCD_W-34-bw, 10, 2, (bat>=0&&bat<20)?C_RED:C_GREEN);
+    char buf[40]; snprintf(buf,sizeof(buf),"Lv %d  %lu studs", pet.level,(unsigned long)pet.studs);
+    textC(buf, LCD_W/2, 34, 2, C_CYAN);
   }
   drawStatBar(0, "HUNGER", pet.hunger, 70, 240, 150);
   drawStatBar(1, "ENERGY", pet.energy, 246, 240, 150);
@@ -619,6 +651,7 @@ void handleHome(const UiEvent &ev) {
   } else if (ev.type == EV_SWIPE_U) { screen = SCR_GAMES; screenDirty = true; }
   else if (ev.type == EV_SWIPE_L) { screen = SCR_STATS; screenDirty = true; }
   else if (ev.type == EV_SWIPE_R) { screen = SCR_STATS; screenDirty = true; }
+  else if (ev.type == EV_SWIPE_D) { screen = SCR_SETTINGS; screenDirty = true; }
 }
 
 /* ------- shared BACK/HOME button for every sub-screen ------- */
@@ -757,6 +790,67 @@ void drawAgentDynamic(){
 }
 void handleAgent(const UiEvent &ev){
   if (isSwipe(ev) || hitBack(ev)){ screen=SCR_HOME; screenDirty=true; }
+}
+
+/* ===================================================================
+   SETTINGS SCREEN  (brightness / clock / reset) - all offline
+   =================================================================== */
+void saveBright(){ prefs.begin("alon",false); prefs.putInt("bri",brightness); prefs.end(); }
+
+void bumpTime(int dh,int dm){
+  if(!rtcOK) return;
+  RTC_DateTime t = rtc.getDateTime();
+  int hh=((int)t.hour+dh+24)%24, mm=((int)t.minute+dm+60)%60;
+  int yr=(t.year>=2020&&t.year<2100)?t.year:2026;
+  int mo=(t.month>=1&&t.month<=12)?t.month:1;
+  int dy=(t.day>=1&&t.day<=31)?t.day:1;
+  rtc.setDateTime(RTC_DateTime(yr,mo,dy,hh,mm,0));
+}
+
+void resetPet(){
+  uint8_t owned=pet.ownedMask, eq=pet.equipped;   // keep purchased themes
+  pet = Pet();
+  pet.ownedMask=owned; pet.equipped=eq;
+  saveState();
+}
+
+void drawSettings(){
+  gfx->fillScreen(C_BLACK);
+  textC("SETTINGS", 233, 44, 3, THEMES[pet.equipped].accent);
+  // Brightness
+  textC("Brightness", 233, 88, 2, C_WHITE);
+  gfx->fillRoundRect(120,106,44,40,10,C_DIMGREY); textC("-",142,126,3,C_WHITE);
+  char b[8]; snprintf(b,sizeof(b),"%d",brightness); textC(b,233,126,2,C_CYAN);
+  gfx->fillRoundRect(302,106,44,40,10,C_DIMGREY); textC("+",324,126,3,C_WHITE);
+  // Clock
+  int hh=0,mm=0; if(rtcOK){ RTC_DateTime t=rtc.getDateTime(); hh=t.hour; mm=t.minute; }
+  textC(rtcOK?"Clock":"Clock (no RTC)", 233, 168, 2, C_WHITE);
+  gfx->fillRoundRect(96,186,34,36,8,C_DIMGREY);  textC("-",113,204,2,C_WHITE);
+  char hb[6]; snprintf(hb,sizeof(hb),"%02d",hh);  textC(hb,160,204,2,C_CYAN);
+  gfx->fillRoundRect(178,186,34,36,8,C_DIMGREY); textC("+",195,204,2,C_WHITE);
+  textC(":",233,204,2,C_WHITE);
+  gfx->fillRoundRect(254,186,34,36,8,C_DIMGREY); textC("-",271,204,2,C_WHITE);
+  char mb[6]; snprintf(mb,sizeof(mb),"%02d",mm);  textC(mb,318,204,2,C_CYAN);
+  gfx->fillRoundRect(336,186,34,36,8,C_DIMGREY); textC("+",353,204,2,C_WHITE);
+  // Reset pet
+  gfx->fillRoundRect(133,246,200,42,10,C_RED); textC("RESET PET",233,267,2,C_WHITE);
+  drawBackBtn();
+}
+void handleSettings(const UiEvent &ev){
+  if(isSwipe(ev)||hitBack(ev)){ screen=SCR_HOME; screenDirty=true; return; }
+  if(ev.type!=EV_DOWN) return;
+  int x=ev.x,y=ev.y;
+  if(y>=106&&y<=146){
+    if(x>=120&&x<=164){ brightness=clampi(brightness-20,20,250); gfx->setBrightness(brightness); saveBright(); screenDirty=true; return; }
+    if(x>=302&&x<=346){ brightness=clampi(brightness+20,20,250); gfx->setBrightness(brightness); saveBright(); screenDirty=true; return; }
+  }
+  if(y>=186&&y<=222){
+    if(x>=96 &&x<=130){ bumpTime(-1,0); screenDirty=true; return; }
+    if(x>=178&&x<=212){ bumpTime(+1,0); screenDirty=true; return; }
+    if(x>=254&&x<=288){ bumpTime(0,-1); screenDirty=true; return; }
+    if(x>=336&&x<=370){ bumpTime(0,+1); screenDirty=true; return; }
+  }
+  if(x>=133&&x<=333&&y>=246&&y<=288){ resetPet(); screenDirty=true; return; }
 }
 
 /* ===================================================================
@@ -1009,11 +1103,30 @@ void setup(){
   imuOK = false;
   (void)imu;  // keep the object; simply unused for now
 
+  // ---- Real-time clock (PCF85063) for the home clock + settings ----
+  rtcOK = rtc.begin(Wire, IIC_SDA, IIC_SCL);
+  if(!rtcOK) Serial.println("rtc begin failed");
+
+  // ---- BOOT side button (short button) = go home / wake ----
+  pinMode(BOOT_BTN, INPUT_PULLUP);
+  bootPrev = digitalRead(BOOT_BTN);
+
   loadState();
+  gfx->setBrightness(brightness);     // apply saved brightness
   lastDecay = millis();
   delay(400);
   screen = SCR_HOME;
   screenDirty = true;
+}
+
+// SHORT side button (BOOT): wake + jump home from anywhere.
+void checkBoot(){
+  bool lvl = digitalRead(BOOT_BTN);         // LOW = pressed
+  if(bootPrev && !lvl){
+    if(pet.sleeping){ pet.sleeping=false; gfx->setBrightness(brightness); }
+    if(screen!=SCR_HOME){ screen=SCR_HOME; screenDirty=true; }
+  }
+  bootPrev = lvl;
 }
 
 void enterScreen(){
@@ -1027,6 +1140,7 @@ void enterScreen(){
     case SCR_SNAKE: drawSnakeStatic(); break;
     case SCR_MOLE:  drawMoleStatic();  break;
     case SCR_2048:  drawG2Static();    break;
+    case SCR_SETTINGS: drawSettings(); break;
   }
 }
 
@@ -1049,6 +1163,7 @@ void loop(){
     case SCR_SNAKE: handleSnake(ev); break;
     case SCR_MOLE:  handleMole(ev);  break;
     case SCR_2048:  handle2048(ev);  break;
+    case SCR_SETTINGS: handleSettings(ev); break;
   }
 
   // if a handler changed screens, let the next loop draw it fresh
@@ -1068,5 +1183,6 @@ void loop(){
 #endif
   decayNeeds();
   checkShake();
+  checkBoot();
   delay(2);          // keeps the touch loop tight & responsive
 }
