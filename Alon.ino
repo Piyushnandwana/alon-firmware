@@ -234,6 +234,7 @@ void handleTimer(const UiEvent &ev);
 void handleBattery(const UiEvent &ev);
 void handleFlash(const UiEvent &ev);
 void handleSysinfo(const UiEvent &ev);
+bool appBack(const UiEvent &ev);
 
 #ifndef TOUCH_DEBUG
 #define TOUCH_DEBUG 0       // 1 = show a live touch readout at the bottom
@@ -1219,7 +1220,7 @@ void handleStopwatch(const UiEvent &ev){
 }
 
 /* ---------------- TIMER ------------------------------------------ */
-int timerMin=5; uint32_t timerEnd=0; bool timerRun=false; bool timerDone=false;
+int timerMin=5; uint32_t tmrEnd=0; bool timerRun=false; bool timerDone=false;
 void drawTimerStatic(){
   appHeader("TIMER");
   gfx->fillRoundRect(96,150,44,44,10,C_DIMGREY); textC("-",118,172,3,C_WHITE);
@@ -1230,7 +1231,7 @@ void drawTimerStatic(){
 void tickTimer(){
   static uint32_t last=0; if(millis()-last<100) return; last=millis();
   long rem;
-  if(timerRun){ rem=(long)timerEnd-(long)millis(); if(rem<=0){ rem=0; timerRun=false; timerDone=true; } }
+  if(timerRun){ rem=(long)tmrEnd-(long)millis(); if(rem<=0){ rem=0; timerRun=false; timerDone=true; } }
   else rem = timerDone?0:(long)timerMin*60000;
   gfx->fillRect(150,158,176,36,C_BLACK);
   char b[12]; snprintf(b,sizeof(b),"%02ld:%02ld",(rem/60000),(rem/1000)%60); textC(b,233,176,3,timerDone?C_RED:C_WHITE);
@@ -1244,7 +1245,7 @@ void handleTimer(const UiEvent &ev){
     if(ev.x>=326&&ev.x<=370){ timerMin=clampi(timerMin+1,1,99); timerDone=false; screenDirty=true; }
   }
   if(ev.x>=96&&ev.x<=370&&ev.y>=300&&ev.y<=342){
-    if(timerRun){ timerRun=false; } else { timerEnd=millis()+(uint32_t)timerMin*60000; timerRun=true; timerDone=false; }
+    if(timerRun){ timerRun=false; } else { tmrEnd=millis()+(uint32_t)timerMin*60000; timerRun=true; timerDone=false; }
     screenDirty=true;
   }
 }
