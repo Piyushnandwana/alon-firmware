@@ -234,7 +234,7 @@ void handleSysinfo(const UiEvent &ev);
 bool appBack(const UiEvent &ev);
 
 #ifndef TOUCH_DEBUG
-#define TOUCH_DEBUG 1       // 1 = show a live touch readout (diagnostic)
+#define TOUCH_DEBUG 0       // 1 = show a live touch readout (diagnostic)
 #endif
 
 // TOUCH_TEST: boot into a calibration screen instead of the pet. Tap the
@@ -610,13 +610,7 @@ void drawHomeDynamic() {
     char buf[32]; snprintf(buf,sizeof(buf),"Lv%d  %lu studs", pet.level,(unsigned long)pet.studs);
     textC(buf, 233, 68, 2, C_YELLOW);
   }
-  // Bottom HUD: hunger/energy (inside the visible circle)
-  if (pet.hunger!=lastH || pet.energy!=lastE){
-    lastH=pet.hunger; lastE=pet.energy;
-    gfx->fillRoundRect(78, 400, 310, 28, 8, C_BLACK);
-    textL("H",86,407,1,C_GREY); miniBar(pet.hunger,102,405,122);
-    textL("E",240,407,1,C_GREY); miniBar(pet.energy,256,405,122);
-  }
+  (void)lastH; (void)lastE;   // needs/stat bars removed (no care game)
 }
 
 void handleHome(const UiEvent &ev) {
@@ -627,9 +621,7 @@ void handleHome(const UiEvent &ev) {
     triggerPet(); saveState();
   }
   else if (ev.type == EV_HOLD && central) { screen = SCR_AGENT; screenDirty = true; }
-  else if (ev.type == EV_SWIPE_L) { screen = SCR_CARE;     screenDirty = true; }
-  else if (ev.type == EV_SWIPE_R) { screen = SCR_SHOP;     screenDirty = true; }
-  else if (ev.type == EV_SWIPE_U) { screen = SCR_APPS;     screenDirty = true; }
+  else if (ev.type == EV_SWIPE_U || ev.type == EV_SWIPE_L || ev.type == EV_SWIPE_R) { screen = SCR_APPS; screenDirty = true; }
   else if (ev.type == EV_SWIPE_D) { screen = SCR_SETTINGS; screenDirty = true; }
 }
 
@@ -805,9 +797,8 @@ void drawSettings(){
   gfx->fillRoundRect(336,186,34,36,8,C_DIMGREY); textC("+",353,204,2,C_WHITE);
   // Reset pet
   // Stats + Sleep toggle
-  gfx->fillRoundRect(96,240,120,40,10,C_DIMGREY); textC("STATS",156,260,2,C_WHITE);
-  gfx->fillRoundRect(250,240,120,40,10,C_DIMGREY); textC(pet.sleeping?"WAKE":"SLEEP",310,260,2,C_WHITE);
-  gfx->fillRoundRect(133,292,200,38,10,C_RED); textC("RESET PET",233,311,2,C_WHITE);
+  gfx->fillRoundRect(133,240,200,40,10,C_DIMGREY); textC(pet.sleeping?"WAKE":"SLEEP",233,260,2,C_WHITE);
+  gfx->fillRoundRect(133,292,200,38,10,C_RED); textC("RESET",233,311,2,C_WHITE);
   drawBackBtn();
 }
 void handleSettings(const UiEvent &ev){
@@ -824,10 +815,7 @@ void handleSettings(const UiEvent &ev){
     if(x>=254&&x<=288){ bumpTime(0,-1); screenDirty=true; return; }
     if(x>=336&&x<=370){ bumpTime(0,+1); screenDirty=true; return; }
   }
-  if(y>=240&&y<=280){
-    if(x>=96 &&x<=216){ screen=SCR_STATS; screenDirty=true; return; }
-    if(x>=250&&x<=370){ pet.sleeping=!pet.sleeping; gfx->setBrightness(pet.sleeping?30:brightness); saveState(); screenDirty=true; return; }
-  }
+  if(x>=133&&x<=333&&y>=240&&y<=280){ pet.sleeping=!pet.sleeping; gfx->setBrightness(pet.sleeping?30:brightness); saveState(); screenDirty=true; return; }
   if(x>=133&&x<=333&&y>=292&&y<=330){ resetPet(); screenDirty=true; return; }
 }
 
@@ -1425,7 +1413,6 @@ void loop(){
 #if TOUCH_DEBUG
   drawTouchDebug();
 #endif
-  decayNeeds();
   checkShake();
   checkBoot();
   delay(2);          // keeps the touch loop tight & responsive
