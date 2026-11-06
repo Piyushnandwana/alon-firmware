@@ -101,7 +101,7 @@ Preferences prefs;
 int batteryPercent(){
   Wire.beginTransmission(PMU_ADDR);
   Wire.write(0xA4);
-  if(Wire.endTransmission(false)!=0) return -1;
+  if(Wire.endTransmission(true)!=0) return -1;
   if(Wire.requestFrom(PMU_ADDR,1)!=1) return -1;
   int p = Wire.read();
   return (p>=0 && p<=100) ? p : -1;
@@ -109,7 +109,7 @@ int batteryPercent(){
 // AXP2101 charging status (reg 0x00 bit5 = battery present; reg 0x01 charge state).
 bool batteryCharging(){
   Wire.beginTransmission(PMU_ADDR); Wire.write(0x01);
-  if(Wire.endTransmission(false)!=0) return false;
+  if(Wire.endTransmission(true)!=0) return false;
   if(Wire.requestFrom(PMU_ADDR,1)!=1) return false;
   int s=Wire.read();
   return ((s>>5)&0x03)==0x01;   // 01b = charging
@@ -234,7 +234,7 @@ void handleSysinfo(const UiEvent &ev);
 bool appBack(const UiEvent &ev);
 
 #ifndef TOUCH_DEBUG
-#define TOUCH_DEBUG 0       // 1 = show a live touch readout at the bottom
+#define TOUCH_DEBUG 1       // 1 = show a live touch readout (diagnostic)
 #endif
 
 // TOUCH_TEST: boot into a calibration screen instead of the pet. Tap the
@@ -355,9 +355,9 @@ void drawTouchDebug() {
   if (millis() - last < 120) return; last = millis();
   if (dbgX == lx && dbgY == ly && dbgN == ln) return;
   lx = dbgX; ly = dbgY; ln = dbgN;
-  gfx->fillRect(60, 450, LCD_W - 120, 14, C_BLACK);
-  char b[48]; snprintf(b, sizeof(b), "touch n%d  x%d y%d  %s", dbgN, dbgX, dbgY, dbgEv);
-  textC(b, LCD_W / 2, 457, 1, C_GREY);
+  gfx->fillRect(30, 294, LCD_W - 60, 24, C_BLACK);
+  char b[48]; snprintf(b, sizeof(b), "n%d x%d y%d %s", dbgN, dbgX, dbgY, dbgEv);
+  textC(b, LCD_W / 2, 304, 2, C_YELLOW);
 }
 #endif
 
@@ -1299,6 +1299,7 @@ void setup(){
   // ---- I2C (shared bus, 400kHz as the board BSP requires) ----
   Wire.begin(IIC_SDA, IIC_SCL);
   Wire.setClock(400000);
+  Wire.setTimeOut(25);        // never let a stuck I2C read freeze the loop
 
   // ---- Display ----
   if(!gfx->begin()){ Serial.println("gfx begin failed"); }
