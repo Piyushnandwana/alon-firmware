@@ -115,19 +115,16 @@ bool batteryCharging(){
   return ((s>>5)&0x03)==0x01;   // 01b = charging
 }
 
-// Bounded I2C probe of the QMI8658 WHO_AM_I (0x00 -> 0x05). Prevents the
-// library init from hanging when the IMU isn't answering.
+// Bounded I2C ping: does the IMU ACK its address? Prevents the library init
+// from hanging when the chip isn't answering, without touching its registers.
 bool imuProbe(){
-  Wire.beginTransmission(IMU_ADDR); Wire.write(0x00);
-  if(Wire.endTransmission(false)!=0) return false;
-  if(Wire.requestFrom(IMU_ADDR,1)!=1) return false;
-  return Wire.read()==0x05;
+  Wire.beginTransmission(IMU_ADDR);
+  return Wire.endTransmission()==0;
 }
 bool imuRead(){
   if(!imuOK) return false;
   if(!imu.getDataReady()) return false;
-  imu.getAccelerometer(accX,accY,accZ);
-  imu.getGyroscope(gyrX,gyrY,gyrZ);
+  imu.getAccelerometer(accX,accY,accZ);   // accelerometer only (gyro unused)
   return true;
 }
 
@@ -1329,10 +1326,9 @@ void setup(){
   if(imuProbe()){
     imuOK = imu.begin(Wire, QMI8658_L_SLAVE_ADDRESS, IIC_SDA, IIC_SCL);
     if(imuOK){
+      // EXACTLY Waveshare's working sequence: accelerometer only.
       imu.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_1000Hz, SensorQMI8658::LPF_MODE_0);
-      imu.configGyroscope(SensorQMI8658::GYR_RANGE_256DPS, SensorQMI8658::GYR_ODR_896_8Hz, SensorQMI8658::LPF_MODE_0);
       imu.enableAccelerometer();
-      imu.enableGyroscope();
     }
   } else { imuOK=false; Serial.println("IMU not detected (sensor apps disabled)"); }
 
