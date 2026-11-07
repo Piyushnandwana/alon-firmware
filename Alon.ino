@@ -85,7 +85,6 @@ SensorQMI8658   imu;
 bool imuOK = false;
 float accX=0, accY=0, accZ=1, gyrX=0, gyrY=0, gyrZ=0;
 
-SensorPCF85063  rtc;
 bool rtcOK = false;
 
 #define BOOT_BTN 0             // SHORT side button = BOOT (GPIO0, active low)
@@ -93,6 +92,7 @@ bool rtcOK = false;
 #define PMU_ADDR 0x34          // AXP2101 power chip
 
 int  brightness = 140;         // 20..250, saved in NVS
+bool silent = false;          // mute tap/UI sounds (audio comes in Phase 2)
 bool bootPrev = true;          // BOOT button previous level (pulled up = high)
 
 Preferences prefs;
@@ -126,6 +126,23 @@ bool imuRead(){
   if(!imu.getDataReady()) return false;
   imu.getAccelerometer(accX,accY,accZ);   // accelerometer only (gyro unused)
   return true;
+}
+
+// --- PCF85063 real-time clock via direct registers (non-blocking) ---
+uint8_t bcd2dec(uint8_t b){ return (uint8_t)((b>>4)*10 + (b&0x0F)); }
+uint8_t dec2bcd(uint8_t d){ return (uint8_t)(((d/10)<<4) | (d%10)); }
+bool rtcProbe(){ Wire.beginTransmission(RTC_ADDR); return Wire.endTransmission()==0; }
+bool rtcGet(int &hh,int &mm,int &ss){
+  Wire.beginTransmission(RTC_ADDR); Wire.write(0x04);
+  if(Wire.endTransmission(true)!=0) return false;
+  if(Wire.requestFrom(RTC_ADDR,3)!=3) return false;
+  ss=bcd2dec(Wire.read()&0x7F); mm=bcd2dec(Wire.read()&0x7F); hh=bcd2dec(Wire.read()&0x3F);
+  return true;
+}
+void rtcSet(int hh,int mm,int ss){
+  Wire.beginTransmission(RTC_ADDR); Wire.write(0x04);
+  Wire.write(dec2bcd((uint8_t)ss)); Wire.write(dec2bcd((uint8_t)mm)); Wire.write(dec2bcd((uint8_t)hh));
+  Wire.endTransmission(true);
 }
 
 /* ----------------------- COLOR / THEME ------------------------------ */
@@ -410,7 +427,7 @@ void textL(const char *s, int x, int y, uint8_t size, uint16_t color) {
    Audio uses the ES8311 codec behind the TCA9554 expander + I2S. That
    setup is involved; to guarantee a rock-solid first build we ship v1
    silent. Hook your beeps in here once the codec path is wired.        */
-void beep(int /*freq*/, int /*ms*/) { /* Phase 2 */ }
+void beep(int /*freq*/, int /*ms*/) { if(silent) return; /* speaker output: Phase 2 */ }
 
 /* ----------------------- NVS PERSISTENCE ---------------------------- */
 void saveState() {
@@ -438,6 +455,7 @@ void loadState() {
   pet.ownedMask = prefs.getUChar("owned", 0x01);
   pet.equipped  = prefs.getUChar("equip", 0);
   brightness    = prefs.getInt("bri", 140);
+  silent        = prefs.getBool("silent", false);
   prefs.end();
 }
 
@@ -541,21 +559,38 @@ uint32_t petAnimStart = 0;
 const uint16_t* homeImg(){ return pet.sleeping ? img_sleep : img_idle; }
 void blitFull(const uint16_t* img){ gfx->draw16bitRGBBitmap(0, 0, img, 466, 466); }
 
-// Tapping Alon shows his celebration render (arms up, fireworks) for a beat,
-// then returns to the idle image - his reaction to being petted.
+// Pet reaction: a lively particle burst (sparkles + rising hearts) animated
+// over Alon's real idle image - no frame-swap, it actually moves.
+#define PET_MS 780
+struct Spark { float x,y,vx,vy; uint16_t col; };
+Spark sparks[18];
+uint32_t lastPetFrame=0;
+void drawHeartAt(int cx,int cy,uint16_t col){
+  gfx->fillCircle(cx-5,cy,5,col); gfx->fillCircle(cx+5,cy,5,col);
+  gfx->fillTriangle(cx-10,cy+1,cx+10,cy+1,cx,cy+13,col);
+}
 void triggerPet(){
-  petAnimOn = true; petAnimStart = millis();
-  blitFull(img_celebration);
-  // a few hearts on top for extra pop
-  for(int i=0;i<4;i++) {
-    gfx->fillCircle(150+i*55, 120, 7, C_RED);
-    gfx->fillCircle(164+i*55, 120, 7, C_RED);
-    gfx->fillTriangle(143+i*55,122, 171+i*55,122, 157+i*55,140, C_RED);
+  petAnimOn = true; petAnimStart = millis(); lastPetFrame = 0;
+  for(int i=0;i<18;i++){
+    float a=(i/18.0f)*6.2832f, sp=2.2f+(esp_random()%120)/40.0f;
+    sparks[i].x=233; sparks[i].y=175;
+    sparks[i].vx=cosf(a)*sp; sparks[i].vy=sinf(a)*sp-2.0f;
+    sparks[i].col=(i%3==0)?C_YELLOW:(i%3==1)?C_CYAN:0xF81F;
   }
 }
 void animateAvatar(){
   if(!petAnimOn) return;
-  if(millis()-petAnimStart > 900){ petAnimOn = false; screenDirty = true; }  // back to home
+  uint32_t now=millis(); int age=now-petAnimStart;
+  if(age>=PET_MS){ petAnimOn=false; screenDirty=true; return; }   // settle back to home
+  if(now-lastPetFrame<40) return; lastPetFrame=now;
+  blitFull(img_idle);                         // re-blit clears last frame's particles
+  for(int i=0;i<18;i++){
+    sparks[i].x+=sparks[i].vx; sparks[i].y+=sparks[i].vy; sparks[i].vy+=0.18f;
+    int sx=(int)sparks[i].x, sy=(int)sparks[i].y;
+    if(sx>3&&sx<463&&sy>3&&sy<463) gfx->fillCircle(sx,sy,3,sparks[i].col);
+  }
+  int hy = 205 - age*70/PET_MS;               // hearts float up
+  drawHeartAt(205,hy,0xF81F); drawHeartAt(262,hy-14,C_RED);
 }
 
 /* ===================================================================
@@ -590,27 +625,30 @@ void drawHomeStatic() {
   lastStudsShown = 0xFFFFFFFF; lastLevelShown = -1;
 }
 
+// A clean little battery glyph with fill.
+void drawBatteryIcon(int x,int y,int pct){
+  gfx->drawRoundRect(x,y,34,16,3,C_WHITE);
+  gfx->fillRect(x+34,y+5,3,6,C_WHITE);
+  if(pct>=0){ uint16_t c=pct<20?C_RED:(pct<50?0xFD20:C_GREEN);
+    int w=28*pct/100; gfx->fillRoundRect(x+3,y+3,w<3?3:w,10,2,c); }
+}
+
 void drawHomeDynamic() {
   if (petAnimOn) return;                      // don't draw HUD over the reaction
   static uint32_t lastClk=0, lastBatMs=0;
-  static int hh=-1, mm=-1, bat=-1, lastMin=-2, lastBat=-2;
-  static int lastH=-1, lastE=-1;
+  static int hh=-1, mm=-1, ss=0, bat=-1, lastSec=-2, lastBat=-2;
   uint32_t now=millis();
-  if (rtcOK && now-lastClk>1000){ lastClk=now; RTC_DateTime t=rtc.getDateTime(); hh=t.getHour(); mm=t.getMinute(); }
+  if (rtcOK && now-lastClk>500){ lastClk=now; rtcGet(hh,mm,ss); }
   if (now-lastBatMs>5000 || lastBat==-2){ lastBatMs=now; bat=batteryPercent(); }
 
-  // Top HUD (kept inside the visible circle, near centre-top)
-  if (mm!=lastMin || bat!=lastBat || pet.studs!=lastStudsShown || pet.level!=lastLevelShown){
-    lastMin=mm; lastBat=bat; lastStudsShown=pet.studs; lastLevelShown=pet.level;
-    gfx->fillRoundRect(96, 26, 274, 56, 12, C_BLACK);
+  // Top HUD: live clock + battery glyph (centre-top, inside the circle). No level/studs.
+  if (ss!=lastSec || bat!=lastBat){
+    lastSec=ss; lastBat=bat;
+    gfx->fillRoundRect(120, 24, 226, 40, 12, C_BLACK);
     char c[8]; if(hh>=0) snprintf(c,sizeof(c),"%02d:%02d",hh,mm); else snprintf(c,sizeof(c),"--:--");
-    textC(c, 160, 44, 2, C_CYAN);
-    char bb[8]; if(bat>=0) snprintf(bb,sizeof(bb),"%d%%",bat); else snprintf(bb,sizeof(bb),"--");
-    textC(bb, 312, 44, 2, (bat>=0&&bat<20)?C_RED:C_GREEN);
-    char buf[32]; snprintf(buf,sizeof(buf),"Lv%d  %lu studs", pet.level,(unsigned long)pet.studs);
-    textC(buf, 233, 68, 2, C_YELLOW);
+    textC(c, 192, 44, 2, C_CYAN);
+    drawBatteryIcon(272, 36, bat);
   }
-  (void)lastH; (void)lastE;   // needs/stat bars removed (no care game)
 }
 
 void handleHome(const UiEvent &ev) {
@@ -759,15 +797,13 @@ void handleAgent(const UiEvent &ev){
    SETTINGS SCREEN  (brightness / clock / reset) - all offline
    =================================================================== */
 void saveBright(){ prefs.begin("alon",false); prefs.putInt("bri",brightness); prefs.end(); }
+void saveSilent(){ prefs.begin("alon",false); prefs.putBool("silent",silent); prefs.end(); }
 
 void bumpTime(int dh,int dm){
   if(!rtcOK) return;
-  RTC_DateTime t = rtc.getDateTime();
-  int hh=((int)t.getHour()+dh+24)%24, mm=((int)t.getMinute()+dm+60)%60;
-  int yr=(t.getYear()>=2020&&t.getYear()<2100)?t.getYear():2026;
-  int mo=(t.getMonth()>=1&&t.getMonth()<=12)?t.getMonth():1;
-  int dy=(t.getDay()>=1&&t.getDay()<=31)?t.getDay():1;
-  rtc.setDateTime(RTC_DateTime(yr,mo,dy,hh,mm,0));
+  int hh=0,mm=0,ss=0; rtcGet(hh,mm,ss);
+  hh=(hh+dh+24)%24; mm=(mm+dm+60)%60;
+  rtcSet(hh,mm,0);
 }
 
 void resetPet(){
@@ -786,7 +822,7 @@ void drawSettings(){
   char b[8]; snprintf(b,sizeof(b),"%d",brightness); textC(b,233,126,2,C_CYAN);
   gfx->fillRoundRect(302,106,44,40,10,C_DIMGREY); textC("+",324,126,3,C_WHITE);
   // Clock
-  int hh=0,mm=0; if(rtcOK){ RTC_DateTime t=rtc.getDateTime(); hh=t.getHour(); mm=t.getMinute(); }
+  int hh=0,mm=0,ss=0; if(rtcOK){ rtcGet(hh,mm,ss); }
   textC(rtcOK?"Clock":"Clock (no RTC)", 233, 168, 2, C_WHITE);
   gfx->fillRoundRect(96,186,34,36,8,C_DIMGREY);  textC("-",113,204,2,C_WHITE);
   char hb[6]; snprintf(hb,sizeof(hb),"%02d",hh);  textC(hb,160,204,2,C_CYAN);
@@ -795,10 +831,10 @@ void drawSettings(){
   gfx->fillRoundRect(254,186,34,36,8,C_DIMGREY); textC("-",271,204,2,C_WHITE);
   char mb[6]; snprintf(mb,sizeof(mb),"%02d",mm);  textC(mb,318,204,2,C_CYAN);
   gfx->fillRoundRect(336,186,34,36,8,C_DIMGREY); textC("+",353,204,2,C_WHITE);
-  // Reset pet
-  // Stats + Sleep toggle
-  gfx->fillRoundRect(133,240,200,40,10,C_DIMGREY); textC(pet.sleeping?"WAKE":"SLEEP",233,260,2,C_WHITE);
-  gfx->fillRoundRect(133,292,200,38,10,C_RED); textC("RESET",233,311,2,C_WHITE);
+  // Sleep + Sound toggles, then Reset
+  gfx->fillRoundRect(96,240,120,40,12,0x4A69);  textC(pet.sleeping?"WAKE":"SLEEP",156,260,2,C_WHITE);
+  gfx->fillRoundRect(250,240,120,40,12,silent?C_RED:0x2FEC); textC(silent?"SILENT":"SOUND",310,260,2,C_BLACK);
+  gfx->fillRoundRect(143,292,180,38,12,C_RED); textC("RESET",233,311,2,C_WHITE);
   drawBackBtn();
 }
 void handleSettings(const UiEvent &ev){
@@ -815,8 +851,11 @@ void handleSettings(const UiEvent &ev){
     if(x>=254&&x<=288){ bumpTime(0,-1); screenDirty=true; return; }
     if(x>=336&&x<=370){ bumpTime(0,+1); screenDirty=true; return; }
   }
-  if(x>=133&&x<=333&&y>=240&&y<=280){ pet.sleeping=!pet.sleeping; gfx->setBrightness(pet.sleeping?30:brightness); saveState(); screenDirty=true; return; }
-  if(x>=133&&x<=333&&y>=292&&y<=330){ resetPet(); screenDirty=true; return; }
+  if(y>=240&&y<=280){
+    if(x>=96 &&x<=216){ pet.sleeping=!pet.sleeping; gfx->setBrightness(pet.sleeping?30:brightness); saveState(); screenDirty=true; return; }
+    if(x>=250&&x<=370){ silent=!silent; saveSilent(); screenDirty=true; return; }
+  }
+  if(x>=143&&x<=323&&y>=292&&y<=330){ resetPet(); screenDirty=true; return; }
 }
 
 /* ===================================================================
@@ -1051,8 +1090,7 @@ void drawApps(){
   for(int i=0;i<APPS_PER_PAGE;i++){
     int idx=start+i; if(idx>=APP_COUNT) break;
     int x,y; appTileXY(i,x,y);
-    gfx->fillRoundRect(x,y,130,88,14,C_DIMGREY);
-    gfx->drawRoundRect(x,y,130,88,14,THEMES[pet.equipped].accent);
+    gfx->fillRoundRect(x,y,130,88,16,0x4A69);   // clean flat tile, no outline
     textC(APPS[idx].name, x+65, y+44, 2, C_WHITE);
   }
   int pages=(APP_COUNT+APPS_PER_PAGE-1)/APPS_PER_PAGE;
@@ -1153,9 +1191,8 @@ void drawClockStatic(){ appHeader("CLOCK"); drawBackBtn(); }
 void tickClock(){
   static int ls=-1;
   if(!rtcOK){ textC("set time in settings",233,236,2,C_GREY); return; }
-  RTC_DateTime t=rtc.getDateTime(); int s=t.getSecond();
+  int h=0,m=0,s=0; rtcGet(h,m,s);
   if(s==ls) return; ls=s;
-  int h=t.getHour(), m=t.getMinute();
   gfx->fillCircle(233,236,145,C_BLACK);
   gfx->drawCircle(233,236,145,C_DIMGREY);
   for(int i=0;i<12;i++){ float a=i*30*0.0174533f;
@@ -1308,7 +1345,7 @@ void setup(){
   (void)imuProbe; (void)imu;
 
   // ---- Real-time clock (PCF85063) for the home clock + settings ----
-  rtcOK = rtc.begin(Wire, IIC_SDA, IIC_SCL);
+  rtcOK = rtcProbe();
   if(!rtcOK) Serial.println("rtc begin failed");
 
   // ---- BOOT side button (short button) = go home / wake ----
