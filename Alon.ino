@@ -272,7 +272,7 @@ void reward(uint32_t studs, uint32_t xp);
 /* ----------------------- SCREENS ------------------------------------ */
 enum Screen {
   SCR_HOME, SCR_CARE, SCR_SHOP, SCR_GAMES, SCR_STATS, SCR_AGENT,
-  SCR_SNAKE, SCR_MOLE, SCR_2048, SCR_SETTINGS,
+  SCR_SNAKE, SCR_PONG, SCR_TETRIS, SCR_BREAKOUT, SCR_FLAPPY, SCR_SETTINGS,
   SCR_APPS, SCR_LEVEL, SCR_HORIZON, SCR_STEPS, SCR_CLOCK,
   SCR_STOPWATCH, SCR_TIMER, SCR_BATTERY, SCR_FLASH, SCR_SYSINFO,
   SCR_WIFI
@@ -947,29 +947,31 @@ void handleSettings(const UiEvent &ev){
 /* ===================================================================
    GAMES MENU
    =================================================================== */
-Btn gameBtns[3]={
-  {133,120,200,54,"SNAKE"},
-  {133,190,200,54,"WHACK"},
-  {133,260,200,54,"2048"},
+const int GAME_COUNT = 5;
+struct GameDef { const char *name; Screen scr; };
+GameDef GAME_LIST[GAME_COUNT]={
+  {"SNAKE",SCR_SNAKE}, {"PONG",SCR_PONG}, {"TETRIS",SCR_TETRIS},
+  {"BREAKOUT",SCR_BREAKOUT}, {"FLAPPY",SCR_FLAPPY},
 };
 void drawGames(){
   gfx->fillScreen(C_BLACK);
-  textC("GAMES", LCD_W/2, 68, 3, THEMES[pet.equipped].accent);
-  for (int i=0;i<3;i++){ Btn&b=gameBtns[i];
+  textC("GAMES", LCD_W/2, 50, 3, THEMES[pet.equipped].accent);
+  for (int i=0;i<GAME_COUNT;i++){
+    int y = 90 + i*52;
     uint16_t ac = (i%2==0) ? C_CYAN : C_VIOLET;
-    gfx->fillRoundRect(b.x,b.y,b.w,b.h,14,C_TILE);
-    textC(b.label,b.x+b.w/2,b.y+b.h/2,2,ac);
+    gfx->fillRoundRect(133,y,200,44,14,C_TILE);
+    textC(GAME_LIST[i].name,233,y+22,2,ac);
   }
-  textC("win studs!", LCD_W/2, 326, 1, C_GREY);
+  textC("win studs!", LCD_W/2, 358, 1, C_GREY);
   drawBackBtn();
 }
 void handleGames(const UiEvent &ev){
   if (isSwipe(ev) || hitBack(ev)){ screen=SCR_HOME; screenDirty=true; return; }
   if (ev.type!=EV_DOWN) return;
-  for (int i=0;i<3;i++){ Btn&b=gameBtns[i];
-    if (ev.x>=b.x&&ev.x<=b.x+b.w&&ev.y>=b.y&&ev.y<=b.y+b.h){
-      screen = (i==0)?SCR_SNAKE:(i==1)?SCR_MOLE:SCR_2048;
-      screenDirty=true; return;
+  for (int i=0;i<GAME_COUNT;i++){
+    int y = 90 + i*52;
+    if(ev.x>=133&&ev.x<=333&&ev.y>=y&&ev.y<=y+44){
+      screen=GAME_LIST[i].scr; screenDirty=true; return;
     }
   }
 }
@@ -1024,99 +1026,328 @@ void handleSnake(const UiEvent &ev){
   else if (ev.type==EV_SWIPE_L && snDir!=1) snDir=3;
 }
 
-/* ------------------------- WHACK-A-MOLE ----------------------------- */
-int moleIdx; uint32_t moleTick; int moleScore; int moleMiss; uint32_t moleStart;
-const int MOLE_X[9]={133,233,333,133,233,333,133,233,333};
-const int MOLE_Y[9]={150,150,150,240,240,240,330,330,330};
-void drawMoleHole(int i,bool up){
-  gfx->fillCircle(MOLE_X[i],MOLE_Y[i],36,up?THEMES[pet.equipped].head:C_DIMGREY);
-  if (up){ gfx->fillCircle(MOLE_X[i]-12,MOLE_Y[i]-6,5,C_BLACK); gfx->fillCircle(MOLE_X[i]+12,MOLE_Y[i]-6,5,C_BLACK); }
-}
-void drawMoleStatic(){
+/* ========================= PONG (tilt-controlled) ==================== */
+// Ball and two paddles; player tilts Alon to move bottom paddle, AI moves top.
+#define PN_PW 60       // paddle width
+#define PN_PH  8       // paddle height
+#define PN_BR  6       // ball radius
+float pnBx,pnBy,pnBvx,pnBvy;   // ball pos/vel
+int   pnPly, pnAI;              // paddle x centres
+int   pnScoreP, pnScoreA;
+bool  pnOver;
+uint32_t pnTick;
+void pnResetBall(){ pnBx=233; pnBy=233; pnBvx=(esp_random()%2)?2.5f:-2.5f; pnBvy=-3.0f; }
+void drawPongStatic(){
   gfx->fillScreen(C_BLACK);
-  textC("WHACK", LCD_W/2, 40, 2, THEMES[pet.equipped].accent);
-  moleScore=0; moleMiss=0; moleIdx=esp_random()%9; moleTick=millis(); moleStart=millis();
-  for (int i=0;i<9;i++) drawMoleHole(i,false);
-  drawMoleHole(moleIdx,true);
+  pnPly=pnAI=233; pnScoreP=pnScoreA=0; pnOver=false; pnResetBall(); pnTick=millis();
+  textC("tilt to move",233,230,1,C_GREY);
 }
-void stepMole(){
-  uint32_t now=millis();
-  if (now-moleStart>30000){               // 30s round
-    reward(moleScore,moleScore*2); saveState();
-    gfx->fillRect(0,60,LCD_W,40,C_BLACK);
-    char b[24]; snprintf(b,sizeof(b),"SCORE %d",moleScore); textC(b,LCD_W/2,80,2,C_GREEN);
-    textC("swipe down: exit",LCD_W/2,LCD_H-28,1,C_GREY);
-    return;
+void stepPong(){
+  if(pnOver) return;
+  uint32_t now=millis(); if(now-pnTick<25) return; pnTick=now;
+  // player paddle from IMU tilt
+  if(imuOK && imuRead()){ pnPly = clampi(233 + (int)(accX * 160), PN_PW/2+20, 466-PN_PW/2-20); }
+  // AI paddle tracks ball loosely
+  if(pnBx > pnAI+8) pnAI = clampi(pnAI+3, PN_PW/2+20, 466-PN_PW/2-20);
+  else if(pnBx < pnAI-8) pnAI = clampi(pnAI-3, PN_PW/2+20, 466-PN_PW/2-20);
+  // erase old ball
+  gfx->fillCircle((int)pnBx,(int)pnBy,PN_BR+1,C_BLACK);
+  // move ball
+  pnBx+=pnBvx; pnBy+=pnBvy;
+  // wall bounce
+  if(pnBx<30){ pnBx=30; pnBvx=-pnBvx; }
+  if(pnBx>436){ pnBx=436; pnBvx=-pnBvx; }
+  // player paddle (bottom, y=420)
+  if(pnBy>=414 && pnBvy>0 && fabsf(pnBx-pnPly)<PN_PW/2+PN_BR){
+    pnBvy=-fabsf(pnBvy)-0.1f; pnBvx+=(pnBx-pnPly)*0.08f;
   }
-  if (now-moleTick>850){
-    drawMoleHole(moleIdx,false);
-    moleIdx=esp_random()%9; moleTick=now;
-    drawMoleHole(moleIdx,true);
+  // AI paddle (top, y=50)
+  if(pnBy<=56 && pnBvy<0 && fabsf(pnBx-pnAI)<PN_PW/2+PN_BR){
+    pnBvy=fabsf(pnBvy)+0.1f; pnBvx+=(pnBx-pnAI)*0.08f;
   }
-  gfx->fillRect(0,64,LCD_W,16,C_BLACK);
-  char b[20]; snprintf(b,sizeof(b),"hits %d",moleScore); textC(b,LCD_W/2,72,1,C_CYAN);
+  // score
+  if(pnBy<20){ pnScoreP++; pnResetBall(); pnBvy=3.0f; }
+  if(pnBy>446){ pnScoreA++; pnResetBall(); }
+  if(pnScoreP>=5||pnScoreA>=5){
+    pnOver=true; reward(pnScoreP*2, pnScoreP*3); saveState();
+    textC(pnScoreP>=5?"YOU WIN!":"YOU LOSE",233,230,3,pnScoreP>=5?C_GREEN:C_RED);
+    textC("hold: exit",233,440,1,C_GREY); return;
+  }
+  // draw paddles
+  gfx->fillRect(20,418,426,PN_PH,C_BLACK); // clear bottom row
+  gfx->fillRoundRect(pnPly-PN_PW/2,418,PN_PW,PN_PH,3,C_CYAN);
+  gfx->fillRect(20,46,426,PN_PH,C_BLACK);  // clear top row
+  gfx->fillRoundRect(pnAI-PN_PW/2,46,PN_PW,PN_PH,3,C_RED);
+  // draw ball
+  gfx->fillCircle((int)pnBx,(int)pnBy,PN_BR,C_WHITE);
+  // score display
+  gfx->fillRect(180,0,106,20,C_BLACK);
+  char sb[12]; snprintf(sb,sizeof(sb),"%d - %d",pnScoreP,pnScoreA); textC(sb,233,10,1,C_CYAN);
+  // centre line
+  for(int x=40;x<440;x+=20) gfx->fillRect(x,233,2,2,C_DIMGREY);
 }
-void handleMole(const UiEvent &ev){
-  if (ev.type==EV_HOLD){ screen=SCR_GAMES; screenDirty=true; return; }   // hold = quit
-  if (ev.type==EV_SWIPE_D && millis()-moleStart>30000){ screen=SCR_GAMES; screenDirty=true; return; }
-  if (ev.type!=EV_DOWN) return;
-  int dx=ev.x-MOLE_X[moleIdx], dy=ev.y-MOLE_Y[moleIdx];
-  if (dx*dx+dy*dy<40*40){ moleScore++; drawMoleHole(moleIdx,false); moleIdx=esp_random()%9; drawMoleHole(moleIdx,true); moleTick=millis(); }
+void handlePong(const UiEvent &ev){
+  if(ev.type==EV_HOLD){ screen=SCR_GAMES; screenDirty=true; return; }
+  // also allow swipe-based paddle control as fallback
+  if(!imuOK){
+    if(ev.type==EV_DOWN){ pnPly=clampi(ev.x,PN_PW/2+20,466-PN_PW/2-20); }
+  }
 }
 
-/* ------------------------- 2048 ------------------------------------- */
-int bd[4][4]; bool g2048over;
-const int G2_OX=101, G2_OY=120, G2_CELL=66;
-uint16_t tileColor(int v){
-  switch(v){case 2:return 0x9492;case 4:return 0xBDD7;case 8:return 0xFD60;case 16:return 0xFCA0;
-    case 32:return 0xFB40;case 64:return 0xF9A6;case 128:return 0xEF20;case 256:return 0xEEC0;
-    case 512:return 0xEE60;case 1024:return 0xE640;default:return 0xE600;}
+/* ========================= TETRIS ==================================== */
+#define TT_COLS  10
+#define TT_ROWS  18
+#define TT_CELL  18
+#define TT_OX    ((466-TT_COLS*TT_CELL)/2)   // centre the board
+#define TT_OY    40
+uint8_t ttBoard[TT_ROWS][TT_COLS];   // 0=empty, 1-7=colour index
+// 7 standard tetrominoes, each as 4 (row,col) offsets from pivot
+struct TTPiece { int cells[4][2]; };
+const TTPiece TT_SHAPES[7]={
+  {{{0,0},{0,1},{1,0},{1,1}}},       // O
+  {{{0,0},{0,1},{0,2},{0,3}}},       // I
+  {{{0,0},{1,0},{1,1},{1,2}}},       // J
+  {{{0,2},{1,0},{1,1},{1,2}}},       // L
+  {{{0,0},{0,1},{1,1},{1,2}}},       // S
+  {{{0,1},{0,2},{1,0},{1,1}}},       // Z
+  {{{0,1},{1,0},{1,1},{1,2}}},       // T
+};
+const uint16_t TT_COLORS[7]={C_YELLOW,C_CYAN,0x001F,C_ORANGE,C_GREEN,C_RED,C_VIOLET};
+int ttCur,ttRot,ttCx,ttCy; // current piece index, rotation, position
+int ttScore; bool ttOver; uint32_t ttTick;
+
+void ttGetCells(int shape,int rot,int cx,int cy,int out[4][2]){
+  for(int i=0;i<4;i++){
+    int r=TT_SHAPES[shape].cells[i][0], c=TT_SHAPES[shape].cells[i][1];
+    for(int j=0;j<(rot%4);j++){ int t=r; r=c; c=2-t; } // 90-degree CW rotations
+    out[i][0]=cy+r; out[i][1]=cx+c;
+  }
 }
-void g2Spawn(){ int e[16],n=0; for(int r=0;r<4;r++)for(int c=0;c<4;c++)if(!bd[r][c])e[n++]=r*4+c;
-  if(!n)return; int k=e[esp_random()%n]; bd[k/4][k%4]=(esp_random()%10)?2:4; }
-void g2DrawTile(int r,int c){
-  int x=G2_OX+c*G2_CELL, y=G2_OY+r*G2_CELL; int v=bd[r][c];
-  gfx->fillRoundRect(x+2,y+2,G2_CELL-4,G2_CELL-4,8,v?tileColor(v):C_DIMGREY);
-  if(v){ char b[6]; snprintf(b,sizeof(b),"%d",v); textC(b,x+G2_CELL/2,y+G2_CELL/2,v<128?3:2,C_BLACK); }
+bool ttFits(int shape,int rot,int cx,int cy){
+  int cells[4][2]; ttGetCells(shape,rot,cx,cy,cells);
+  for(int i=0;i<4;i++){
+    int r=cells[i][0],c=cells[i][1];
+    if(c<0||c>=TT_COLS||r<0||r>=TT_ROWS) return false;
+    if(ttBoard[r][c]) return false;
+  }
+  return true;
 }
-void drawG2Static(){
-  gfx->fillScreen(C_BLACK);
-  textC("2048",LCD_W/2,54,3,THEMES[pet.equipped].accent);
-  for(int r=0;r<4;r++)for(int c=0;c<4;c++)bd[r][c]=0;
-  g2048over=false; g2Spawn(); g2Spawn();
-  for(int r=0;r<4;r++)for(int c=0;c<4;c++)g2DrawTile(r,c);
-  textC("swipe to move   down-hold: exit",LCD_W/2,404,1,C_GREY);
+void ttDrawCell(int r,int c,uint16_t col){
+  if(r<0||r>=TT_ROWS||c<0||c>=TT_COLS) return;
+  gfx->fillRect(TT_OX+c*TT_CELL+1,TT_OY+r*TT_CELL+1,TT_CELL-2,TT_CELL-2,col);
 }
-bool g2Slide(int dir){ // 0 up 1 right 2 down 3 left ; returns moved
-  bool moved=false; int merged[4][4]={{0}};
-  for(int it=0;it<4;it++){
-    for(int r=0;r<4;r++)for(int c=0;c<4;c++){
-      int rr=r,cc=c;
-      if(bd[rr][cc]==0)continue;
-      int nr=rr,nc=cc;
-      if(dir==0)nr=rr-1; else if(dir==2)nr=rr+1; else if(dir==3)nc=cc-1; else nc=cc+1;
-      if(nr<0||nr>3||nc<0||nc>3)continue;
-      if(bd[nr][nc]==0){ bd[nr][nc]=bd[rr][cc]; bd[rr][cc]=0; moved=true; }
-      else if(bd[nr][nc]==bd[rr][cc]&&!merged[nr][nc]&&!merged[rr][cc]){
-        bd[nr][nc]*=2; bd[rr][cc]=0; merged[nr][nc]=1; moved=true; reward(1,1);
-      }
+void ttSpawn(){
+  ttCur=esp_random()%7; ttRot=0; ttCx=TT_COLS/2-1; ttCy=0;
+  if(!ttFits(ttCur,ttRot,ttCx,ttCy)) ttOver=true;
+}
+void ttLock(){
+  int cells[4][2]; ttGetCells(ttCur,ttRot,ttCx,ttCy,cells);
+  for(int i=0;i<4;i++) ttBoard[cells[i][0]][cells[i][1]]=ttCur+1;
+  // clear full rows
+  int cleared=0;
+  for(int r=TT_ROWS-1;r>=0;r--){
+    bool full=true; for(int c=0;c<TT_COLS;c++) if(!ttBoard[r][c]){full=false;break;}
+    if(full){ cleared++;
+      for(int rr=r;rr>0;rr--) for(int c=0;c<TT_COLS;c++) ttBoard[rr][c]=ttBoard[rr-1][c];
+      for(int c=0;c<TT_COLS;c++) ttBoard[0][c]=0;
+      r++; // re-check this row
     }
   }
-  return moved;
+  if(cleared){ ttScore+=cleared*100; reward(cleared,cleared*2); }
+  ttSpawn();
 }
-void g2Move(int dir){
-  if(g2048over)return;
-  if(g2Slide(dir)){ g2Spawn();
-    for(int r=0;r<4;r++)for(int c=0;c<4;c++)g2DrawTile(r,c);
-    saveState();
+void ttDrawBoard(){
+  for(int r=0;r<TT_ROWS;r++) for(int c=0;c<TT_COLS;c++)
+    ttDrawCell(r,c,ttBoard[r][c]?TT_COLORS[ttBoard[r][c]-1]:C_BLACK);
+  // draw current piece
+  int cells[4][2]; ttGetCells(ttCur,ttRot,ttCx,ttCy,cells);
+  for(int i=0;i<4;i++) ttDrawCell(cells[i][0],cells[i][1],TT_COLORS[ttCur]);
+}
+void drawTetrisStatic(){
+  gfx->fillScreen(C_BLACK);
+  memset(ttBoard,0,sizeof(ttBoard)); ttScore=0; ttOver=false; ttTick=millis();
+  ttSpawn();
+  gfx->drawRect(TT_OX-1,TT_OY-1,TT_COLS*TT_CELL+2,TT_ROWS*TT_CELL+2,C_DIMGREY);
+  textC("hold: exit",233,440,1,C_GREY);
+}
+void stepTetris(){
+  if(ttOver){
+    textC("GAME OVER",233,220,3,C_RED);
+    char sb[20]; snprintf(sb,sizeof(sb),"score %d",ttScore); textC(sb,233,260,2,C_CYAN);
+    textC("hold: exit",233,440,1,C_GREY); return;
+  }
+  uint32_t now=millis();
+  int spd = 500 - ttScore/2; if(spd<100) spd=100;
+  if(now-ttTick<(uint32_t)spd) return;
+  ttTick=now;
+  if(ttFits(ttCur,ttRot,ttCx,ttCy+1)) ttCy++;
+  else ttLock();
+  ttDrawBoard();
+  gfx->fillRect(0,0,466,20,C_BLACK);
+  char sb[16]; snprintf(sb,sizeof(sb),"score %d",ttScore); textC(sb,233,10,1,C_CYAN);
+}
+void handleTetris(const UiEvent &ev){
+  if(ev.type==EV_HOLD){ screen=SCR_GAMES; screenDirty=true; return; }
+  if(ttOver) return;
+  if(ev.type==EV_SWIPE_L && ttFits(ttCur,ttRot,ttCx-1,ttCy)) ttCx--;
+  else if(ev.type==EV_SWIPE_R && ttFits(ttCur,ttRot,ttCx+1,ttCy)) ttCx++;
+  else if(ev.type==EV_SWIPE_D){ while(ttFits(ttCur,ttRot,ttCx,ttCy+1)) ttCy++; ttLock(); ttTick=millis(); }
+  else if(ev.type==EV_TAP || ev.type==EV_SWIPE_U){
+    int nr=(ttRot+1)%4;
+    if(ttFits(ttCur,nr,ttCx,ttCy)) ttRot=nr;
+    else if(ttFits(ttCur,nr,ttCx-1,ttCy)){ ttCx--; ttRot=nr; }   // wall kick
+    else if(ttFits(ttCur,nr,ttCx+1,ttCy)){ ttCx++; ttRot=nr; }
   }
 }
-void handle2048(const UiEvent &ev){
+
+/* ========================= BREAKOUT ================================== */
+#define BK_COLS  8
+#define BK_ROWS  5
+#define BK_BW    (400/BK_COLS)  // brick width = 50
+#define BK_BH    14
+#define BK_TOP   70
+#define BK_BOX   33  // left offset to centre bricks
+bool bkBricks[BK_ROWS][BK_COLS];
+float bkBx,bkBy,bkBvx,bkBvy;
+int bkPadX;  // paddle centre x
+int bkScore; bool bkOver; bool bkWin;
+const uint16_t BK_ROW_COLS[BK_ROWS]={C_RED,C_ORANGE,C_YELLOW,C_GREEN,C_CYAN};
+
+void bkResetBall(){ bkBx=233; bkBy=360; bkBvx=(esp_random()%2)?2.0f:-2.0f; bkBvy=-3.0f; }
+void drawBreakoutStatic(){
+  gfx->fillScreen(C_BLACK);
+  for(int r=0;r<BK_ROWS;r++) for(int c=0;c<BK_COLS;c++){
+    bkBricks[r][c]=true;
+    gfx->fillRoundRect(BK_BOX+c*BK_BW+1,BK_TOP+r*(BK_BH+2)+1,BK_BW-2,BK_BH,4,BK_ROW_COLS[r]);
+  }
+  bkPadX=233; bkScore=0; bkOver=false; bkWin=false; bkResetBall();
+  textC("hold: exit",233,440,1,C_GREY);
+}
+void stepBreakout(){
+  if(bkOver){ textC(bkWin?"YOU WIN!":"GAME OVER",233,230,3,bkWin?C_GREEN:C_RED);
+    char sb[16]; snprintf(sb,sizeof(sb),"score %d",bkScore); textC(sb,233,270,2,C_CYAN);
+    textC("hold: exit",233,440,1,C_GREY); return; }
+  uint32_t now=millis(); static uint32_t bkT=0; if(now-bkT<20) return; bkT=now;
+  // erase ball
+  gfx->fillCircle((int)bkBx,(int)bkBy,5,C_BLACK);
+  bkBx+=bkBvx; bkBy+=bkBvy;
+  // wall bounce
+  if(bkBx<30){bkBx=30;bkBvx=-bkBvx;} if(bkBx>436){bkBx=436;bkBvx=-bkBvx;}
+  if(bkBy<30){bkBy=30;bkBvy=-bkBvy;}
+  // paddle (y=400, w=70)
+  if(bkBy>=395 && bkBvy>0 && fabsf(bkBx-bkPadX)<40){
+    bkBvy=-fabsf(bkBvy); bkBvx+=(bkBx-bkPadX)*0.06f;
+  }
+  if(bkBy>450){ bkOver=true; reward(bkScore/2,bkScore); saveState(); return; }
+  // brick collision
+  for(int r=0;r<BK_ROWS;r++) for(int c=0;c<BK_COLS;c++){
+    if(!bkBricks[r][c]) continue;
+    int bx=BK_BOX+c*BK_BW, by=BK_TOP+r*(BK_BH+2);
+    if(bkBx>=bx && bkBx<=bx+BK_BW && bkBy>=by && bkBy<=by+BK_BH){
+      bkBricks[r][c]=false; bkBvy=-bkBvy; bkScore+=10;
+      gfx->fillRoundRect(bx+1,by+1,BK_BW-2,BK_BH,4,C_BLACK);
+      // check win
+      bool any=false; for(int rr=0;rr<BK_ROWS&&!any;rr++) for(int cc=0;cc<BK_COLS;cc++) if(bkBricks[rr][cc]){any=true;break;}
+      if(!any){ bkWin=true; bkOver=true; reward(bkScore,bkScore*2); saveState(); }
+      goto bk_done;
+    }
+  }
+  bk_done:
+  // draw paddle
+  gfx->fillRect(20,398,426,10,C_BLACK);
+  gfx->fillRoundRect(bkPadX-35,398,70,8,3,C_CYAN);
+  // draw ball
+  gfx->fillCircle((int)bkBx,(int)bkBy,5,C_WHITE);
+  // score
+  gfx->fillRect(0,0,466,18,C_BLACK);
+  char sb[16]; snprintf(sb,sizeof(sb),"score %d",bkScore); textC(sb,233,10,1,C_CYAN);
+}
+void handleBreakout(const UiEvent &ev){
   if(ev.type==EV_HOLD){ screen=SCR_GAMES; screenDirty=true; return; }
-  if(ev.type==EV_SWIPE_U)g2Move(0);
-  else if(ev.type==EV_SWIPE_R)g2Move(1);
-  else if(ev.type==EV_SWIPE_D)g2Move(2);
-  else if(ev.type==EV_SWIPE_L)g2Move(3);
+  if(ev.type==EV_DOWN||ev.type==EV_TAP){
+    bkPadX=clampi(ev.x,55,411);
+  }
+}
+
+/* ========================= FLAPPY BIRD =============================== */
+#define FL_GRAV   0.28f
+#define FL_FLAP  -4.5f
+#define FL_GAP    110     // gap between top and bottom pipe
+#define FL_PW     36      // pipe width
+float flY, flVy;          // bird y position and velocity
+int   flPipes[4][2];      // x, gapY for up to 4 pipes
+int   flPipeN;
+int   flScore; bool flOver; bool flStarted;
+uint32_t flTick;
+
+void flResetPipes(){
+  flPipeN=4;
+  for(int i=0;i<4;i++){
+    flPipes[i][0] = 500 + i*140;  // x
+    flPipes[i][1] = 120 + (int)(esp_random()%180);  // gapY centre
+  }
+}
+void drawFlappyStatic(){
+  gfx->fillScreen(C_BLACK);
+  flY=233; flVy=0; flScore=0; flOver=false; flStarted=false; flTick=millis();
+  flResetPipes();
+  textC("TAP TO FLAP",233,200,2,C_CYAN);
+  // draw bird
+  gfx->fillCircle(100,(int)flY,10,C_YELLOW);
+}
+void stepFlappy(){
+  if(!flStarted || flOver) return;
+  uint32_t now=millis(); if(now-flTick<30) return; flTick=now;
+  // physics
+  flVy+=FL_GRAV; flY+=flVy;
+  if(flY<15) { flY=15; flVy=0; }
+  if(flY>450){ flOver=true; reward(flScore,flScore*2); saveState();
+    textC("GAME OVER",233,220,3,C_RED);
+    char sb[16]; snprintf(sb,sizeof(sb),"score %d",flScore); textC(sb,233,260,2,C_CYAN);
+    textC("hold: exit",233,440,1,C_GREY); return; }
+  // clear playfield (only the moving strip)
+  gfx->fillRect(20,20,426,426,C_BLACK);
+  // pipes
+  bool scored=false;
+  for(int i=0;i<flPipeN;i++){
+    flPipes[i][0]-=3;
+    int px=flPipes[i][0], gy=flPipes[i][1];
+    if(px>-FL_PW && px<480){
+      // top pipe
+      gfx->fillRect(px,20,FL_PW,gy-FL_GAP/2-20,C_GREEN);
+      // bottom pipe
+      gfx->fillRect(px,gy+FL_GAP/2,FL_PW,450-gy-FL_GAP/2,C_GREEN);
+      // collision
+      if(100>=px && 100<=px+FL_PW){
+        if(flY<gy-FL_GAP/2+10 || flY>gy+FL_GAP/2-10){
+          flOver=true; reward(flScore,flScore*2); saveState();
+          textC("GAME OVER",233,220,3,C_RED);
+          char sb[16]; snprintf(sb,sizeof(sb),"score %d",flScore); textC(sb,233,260,2,C_CYAN);
+          textC("hold: exit",233,440,1,C_GREY); return;
+        }
+      }
+    }
+    // score when pipe passes bird
+    if(flPipes[i][0]+FL_PW < 100 && flPipes[i][0]+FL_PW >= 97) { flScore++; scored=true; }
+    // recycle pipe
+    if(flPipes[i][0]<-FL_PW){
+      flPipes[i][0]=flPipes[(i+flPipeN-1)%flPipeN][0]+140;
+      flPipes[i][1]=120+(int)(esp_random()%180);
+    }
+  }
+  // draw bird
+  gfx->fillCircle(100,(int)flY,10,C_YELLOW);
+  gfx->fillCircle(107,(int)flY-3,3,C_BLACK);  // eye
+  // score display
+  char sb[8]; snprintf(sb,sizeof(sb),"%d",flScore); textC(sb,233,10,2,C_WHITE);
+}
+void handleFlappy(const UiEvent &ev){
+  if(ev.type==EV_HOLD){ screen=SCR_GAMES; screenDirty=true; return; }
+  if(flOver && ev.type==EV_TAP){ screenDirty=true; return; } // restart
+  if(ev.type==EV_TAP || ev.type==EV_DOWN){
+    if(!flStarted) flStarted=true;
+    flVy=FL_FLAP;
+  }
 }
 
 /* ===================================================================
@@ -1614,9 +1845,11 @@ void enterScreen(){
     case SCR_GAMES: drawGames();       break;
     case SCR_STATS: drawStats();       break;
     case SCR_AGENT: drawAgentStatic(); break;
-    case SCR_SNAKE: drawSnakeStatic(); break;
-    case SCR_MOLE:  drawMoleStatic();  break;
-    case SCR_2048:  drawG2Static();    break;
+    case SCR_SNAKE:   drawSnakeStatic();    break;
+    case SCR_PONG:    imuEnsure(); drawPongStatic(); break;
+    case SCR_TETRIS:  drawTetrisStatic();  break;
+    case SCR_BREAKOUT:drawBreakoutStatic();break;
+    case SCR_FLAPPY:  drawFlappyStatic();  break;
     case SCR_SETTINGS: drawSettings(); break;
     case SCR_APPS:    drawApps();        break;
     case SCR_LEVEL:   drawLevelStatic(); break;
@@ -1654,9 +1887,11 @@ void loop(){
     case SCR_GAMES: handleGames(ev); break;
     case SCR_STATS: handleStats(ev); break;
     case SCR_AGENT: handleAgent(ev); break;
-    case SCR_SNAKE: handleSnake(ev); break;
-    case SCR_MOLE:  handleMole(ev);  break;
-    case SCR_2048:  handle2048(ev);  break;
+    case SCR_SNAKE:   handleSnake(ev);   break;
+    case SCR_PONG:    handlePong(ev);    break;
+    case SCR_TETRIS:  handleTetris(ev);  break;
+    case SCR_BREAKOUT:handleBreakout(ev);break;
+    case SCR_FLAPPY:  handleFlappy(ev);  break;
     case SCR_SETTINGS: handleSettings(ev); break;
     case SCR_APPS:    handleApps(ev);     break;
     case SCR_LEVEL:   handleLevel(ev);    break;
@@ -1687,8 +1922,11 @@ void loop(){
     case SCR_SYSINFO: tickSysinfo();   break;
     case SCR_WIFI:    tickWifi();      break;
     case SCR_AGENT: drawAgentDynamic();break;
-    case SCR_SNAKE: stepSnake();       break;
-    case SCR_MOLE:  stepMole();        break;
+    case SCR_SNAKE:   stepSnake();      break;
+    case SCR_PONG:    stepPong();      break;
+    case SCR_TETRIS:  stepTetris();    break;
+    case SCR_BREAKOUT:stepBreakout();  break;
+    case SCR_FLAPPY:  stepFlappy();    break;
     default: break;
   }
 
