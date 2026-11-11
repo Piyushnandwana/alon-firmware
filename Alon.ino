@@ -73,7 +73,7 @@
 #define TP_RST      40
 #define TP_ADDR     0x5A
 // IMU (QMI8658)
-#define IMU_ADDR    0x6A   // QMI8658 "L" address (Waveshare's own value; 0x6B was wrong)
+#define IMU_ADDR    0x6B   // QMI8658_L_SLAVE_ADDRESS (Waveshare's own value); 0x6A is the H addr
 
 /* If taps land in the wrong place, flip these (then rebuild):          */
 #define TOUCH_FLIP_X 1
@@ -140,9 +140,11 @@ bool imuEnsure(){
   static bool tried=false;
   if(tried) return imuOK;
   tried=true;
-  Wire.beginTransmission(IMU_ADDR);
-  if(Wire.endTransmission()!=0) return false;          // chip not answering
-  if(imu.begin(Wire, IMU_ADDR, IIC_SDA, IIC_SCL)){
+  // Auto-detect the QMI8658: try the L address (0x6B) then the H (0x6A).
+  uint8_t addr=0; const uint8_t cands[2]={0x6B,0x6A};
+  for(int i=0;i<2;i++){ Wire.beginTransmission(cands[i]); if(Wire.endTransmission()==0){ addr=cands[i]; break; } }
+  if(!addr) return false;                               // chip not found on the bus
+  if(imu.begin(Wire, addr, IIC_SDA, IIC_SCL)){
     imu.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_1000Hz, SensorQMI8658::LPF_MODE_0);
     imu.enableAccelerometer();
     imuOK=true;
