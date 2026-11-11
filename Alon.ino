@@ -193,7 +193,7 @@ bool rtcInit(){
 #define C_GREEN     0x37E0
 #define C_YELLOW    0xFEE0   // LEGO head yellow
 #define C_ORANGE    0xFD20
-#define C_TILE      0x18A8   // dark slate tile fill for the neon UI
+#define C_TILE      0x1082   // near-black tile fill so accent borders/icons glow
 
 // Accent themes (owned/equipped in the shop). Index 0 = default cyan/violet.
 struct Theme { const char *name; uint16_t accent; uint16_t head; uint32_t cost; };
