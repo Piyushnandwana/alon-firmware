@@ -236,7 +236,7 @@ bool rtcInit(){
 #define C_GREEN     0x37E0
 #define C_YELLOW    0xFEE0   // LEGO head yellow
 #define C_ORANGE    0xFD20
-#define C_TILE      0x1082   // near-black tile fill so accent borders/icons glow
+#define C_TILE      0x0000   // pure black - icons/text glow on true black AMOLED
 
 // Accent themes (owned/equipped in the shop). Index 0 = default cyan/violet.
 struct Theme { const char *name; uint16_t accent; uint16_t head; uint32_t cost; };
@@ -1448,7 +1448,7 @@ void drawApps(){
     int idx=start+i; if(idx>=APP_COUNT) break;
     int x,y; appTileXY(i,x,y);
     uint16_t ac = (idx%2==0) ? C_CYAN : C_VIOLET;
-    gfx->fillRoundRect(x,y,130,88,16,C_TILE);                 // dark tile, no border
+    // no tile background - icons + text glow directly on black AMOLED
     drawAppIcon(APPS[idx].name, x+65, y+30, ac);
     textC(APPS[idx].name, x+65, y+68, 2, ac);
   }
@@ -1579,22 +1579,29 @@ void tickWifi(){
 /* ---------------- LEVELER (bubble level, uses accelerometer) ------ */
 void drawLevelStatic(){ imuEnsure(); appHeader("LEVELER"); drawBackBtn(); }
 void tickLevel(){
-  static int px=233,py=210; static uint32_t last=0;
-  if(millis()-last<45) return; last=millis();
+  static uint32_t last=0;
+  if(millis()-last<50) return; last=millis();
   if(!imuOK){ textC("IMU not available",233,210,2,C_RED); return; }
   if(!imuRead()) return;
-  gfx->fillCircle(px,py,18,C_BLACK);
-  int bx=233-(int)(accX*150), by=210+(int)(accY*150);
+  // Clear the entire play area each frame to prevent ghost trails
+  gfx->fillCircle(233,210,136,C_BLACK);
+  // Draw reference circles
+  gfx->drawCircle(233,210,120,C_DIMGREY);
+  gfx->drawCircle(233,210,60,C_DIMGREY);
+  gfx->drawCircle(233,210,30,C_GREEN);
+  // Draw crosshair
+  gfx->drawFastHLine(113,210,240,C_DIMGREY);
+  gfx->fillRect(233,90,1,240,C_DIMGREY);   // vertical crosshair
+  // Calculate bubble position
+  int bx=233-(int)(accX*120), by=210+(int)(accY*120);
   float dx=bx-233, dy=by-210, d=sqrtf(dx*dx+dy*dy);
   if(d>104){ bx=233+(int)(dx*104/d); by=210+(int)(dy*104/d); }
-  gfx->drawCircle(233,210,120,C_DIMGREY);
-  gfx->drawCircle(233,210,30,C_GREEN);
   bool level=(abs(bx-233)<16 && abs(by-210)<16);
-  gfx->fillCircle(bx,by,16, level?C_GREEN:C_CYAN);
-  px=bx; py=by;
-  gfx->fillRect(120,348,226,22,C_BLACK);
+  gfx->fillCircle(bx,by,14, level?C_GREEN:C_CYAN);
+  // Degree readout
+  gfx->fillRect(120,340,226,26,C_BLACK);
   char b[28]; snprintf(b,sizeof(b),"%d, %d deg",(int)(accX*90),(int)(accY*90));
-  textC(level?"LEVEL!":b,233,356,2, level?C_GREEN:C_WHITE);
+  textC(level?"LEVEL!":b,233,352,2, level?C_GREEN:C_WHITE);
 }
 void handleLevel(const UiEvent &ev){ appBack(ev); }
 
@@ -1873,8 +1880,9 @@ void loop(){
   touchTestLoop();
   return;
 #endif
+  checkBoot();                                // side button toggles screen on/off (must run even when off)
   if(screenOff){
-    // Screen is off - only side button (handled by checkBoot) or touch wakes it
+    // Screen is off - touch also wakes it
     UiEvent ev = pollGesture();
     if(ev.type == EV_DOWN || ev.type == EV_TAP) screenWake();
     return;
@@ -1937,6 +1945,5 @@ void loop(){
   drawTouchDebug();
 #endif
   checkShake();
-  checkBoot();
   delay(2);          // keeps the touch loop tight & responsive
 }
