@@ -44,6 +44,10 @@
 #include <Preferences.h>
 #include <time.h>
 #include <sys/time.h>
+#include <WiFi.h>
+#include <WiFiManager.h>          // tzapu/WiFiManager - phone captive-portal setup
+#include <WiFiClientSecure.h>
+#include <HTTPUpdate.h>           // OTA: pull app image over WiFi
 #include "Arduino_GFX_Library.h"
 #include "TouchDrvCSTXXX.hpp"
 #include "SensorQMI8658.hpp"
@@ -210,7 +214,8 @@ enum Screen {
   SCR_HOME, SCR_CARE, SCR_SHOP, SCR_GAMES, SCR_STATS, SCR_AGENT,
   SCR_SNAKE, SCR_MOLE, SCR_2048, SCR_SETTINGS,
   SCR_APPS, SCR_LEVEL, SCR_HORIZON, SCR_STEPS, SCR_CLOCK,
-  SCR_STOPWATCH, SCR_TIMER, SCR_BATTERY, SCR_FLASH, SCR_SYSINFO
+  SCR_STOPWATCH, SCR_TIMER, SCR_BATTERY, SCR_FLASH, SCR_SYSINFO,
+  SCR_WIFI
 };
 Screen screen = SCR_HOME;
 bool    screenDirty = true;   // force a full redraw of the current screen
@@ -259,6 +264,7 @@ void handleLevel(const UiEvent &ev);
 void handleMarble(const UiEvent &ev);
 void handleSteps(const UiEvent &ev);
 void handleClock(const UiEvent &ev);
+void handleWifi (const UiEvent &ev);
 void handleStopwatch(const UiEvent &ev);
 void handleTimer(const UiEvent &ev);
 void handleBattery(const UiEvent &ev);
@@ -1094,7 +1100,7 @@ AppDef APPS[] = {
   {"Games", SCR_GAMES}, {"Leveler", SCR_LEVEL}, {"Marble", SCR_HORIZON},
   {"Steps", SCR_STEPS}, {"Clock", SCR_CLOCK},  {"Stopwatch", SCR_STOPWATCH},
   {"Timer", SCR_TIMER}, {"Battery", SCR_BATTERY}, {"Light", SCR_FLASH},
-  {"System", SCR_SYSINFO},
+  {"WiFi", SCR_WIFI}, {"System", SCR_SYSINFO},
 };
 const int APP_COUNT = sizeof(APPS)/sizeof(APPS[0]);
 #define APPS_PER_PAGE 6
@@ -1140,6 +1146,101 @@ void appHeader(const char *title){
 bool appBack(const UiEvent &ev){
   if(hitBack(ev) || ev.type==EV_SWIPE_D){ screen=SCR_APPS; screenDirty=true; return true; }
   return false;
+}
+
+/* ===================================================================
+   WiFi + OTA (wireless updates)
+   - Setup is keyboard-free: Alon makes a hotspot "Alon-Setup"; you join it
+     on your phone, pick your home network, done (WiFiManager handles it).
+   - The ESP32 remembers the network and reconnects on its own after that.
+   - CHECK UPDATE pulls the latest app image from GitHub and self-updates.
+   =================================================================== */
+#define OTA_URL "https://raw.githubusercontent.com/Piyushnandwana/alon-firmware/firmware-bin/Alon-ota-app.bin"
+#define TZ_RULE "EST5EDT,M3.2.0,M11.1.0"     // US Eastern (auto DST)
+String   otaMsg = "";
+uint32_t wifiStatMs = 0;
+
+bool wifiConnected(){ return WiFi.status()==WL_CONNECTED; }
+
+// Non-blocking at boot: reconnect to the last saved network (ESP32 stores it)
+// and arm NTP so the clock sets itself once online.
+void wifiBoot(){
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin();
+  configTzTime(TZ_RULE, "pool.ntp.org", "time.nist.gov");
+}
+
+void drawWifi(){
+  gfx->fillScreen(C_BLACK);
+  textC("WIFI", 233, 40, 3, THEMES[pet.equipped].accent);
+  if(wifiConnected()){
+    textC("Connected", 233, 92, 2, C_GREEN);
+    textC(WiFi.SSID().c_str(), 233, 122, 2, C_WHITE);
+    textC(WiFi.localIP().toString().c_str(), 233, 150, 2, C_CYAN);
+  } else {
+    textC("Not connected", 233, 108, 2, C_RED);
+    textC("tap SETUP, then join", 233, 138, 1, C_GREY);
+    textC("'Alon-Setup' on phone", 233, 156, 1, C_GREY);
+  }
+  gfx->fillRoundRect(96,186,120,44,12,0x2FEC);     textC("SETUP",156,208,2,C_BLACK);
+  gfx->fillRoundRect(250,186,120,44,12,C_DIMGREY); textC("FORGET",310,208,2,C_WHITE);
+  gfx->fillRoundRect(133,246,200,46,12,THEMES[pet.equipped].accent); textC("CHECK UPDATE",233,269,2,C_BLACK);
+  if(otaMsg.length()) textC(otaMsg.c_str(), 233, 316, 1, C_YELLOW);
+  drawBackBtn();
+}
+
+// User-initiated, so a blocking portal is fine; show instructions first.
+void wifiStartPortal(){
+  gfx->fillScreen(C_BLACK);
+  textC("WIFI SETUP", 233, 70, 2, C_CYAN);
+  textC("On your phone, join", 233, 140, 2, C_WHITE);
+  textC("Wi-Fi: Alon-Setup", 233, 172, 2, C_YELLOW);
+  textC("then pick your network", 233, 212, 2, C_WHITE);
+  textC("(waits up to 3 min)", 233, 252, 1, C_GREY);
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180);
+  wm.startConfigPortal("Alon-Setup");
+  configTzTime(TZ_RULE, "pool.ntp.org", "time.nist.gov");
+  otaMsg = wifiConnected() ? "connected" : "setup timed out";
+  screenDirty = true;
+}
+
+void wifiForget(){
+  WiFiManager wm; wm.resetSettings();
+  WiFi.disconnect(true, true);
+  otaMsg = "network forgotten";
+}
+
+// Pull latest app image and flash it. Reboots automatically on success; a
+// failed download leaves the running firmware untouched.
+void otaCheck(){
+  if(!wifiConnected()){ otaMsg="connect wifi first"; screenDirty=true; return; }
+  otaMsg="updating... keep still"; drawWifi();
+  WiFiClientSecure client; client.setInsecure();
+  httpUpdate.rebootOnUpdate(true);
+  t_httpUpdate_return r = httpUpdate.update(client, OTA_URL);
+  if(r==HTTP_UPDATE_FAILED)          otaMsg = String("fail: ")+httpUpdate.getLastError();
+  else if(r==HTTP_UPDATE_NO_UPDATES) otaMsg = "already latest";
+  screenDirty=true;
+}
+
+void handleWifi(const UiEvent &ev){
+  if(appBack(ev)) return;
+  if(ev.type!=EV_DOWN) return;
+  int x=ev.x, y=ev.y;
+  if(y>=186&&y<=230){
+    if(x>=96 &&x<=216){ wifiStartPortal(); return; }
+    if(x>=250&&x<=370){ wifiForget(); screenDirty=true; return; }
+  }
+  if(x>=133&&x<=333&&y>=246&&y<=292){ otaCheck(); return; }
+}
+
+// Flip the screen to "Connected" once it associates in the background.
+void tickWifi(){
+  if(millis()-wifiStatMs<1500) return; wifiStatMs=millis();
+  static int last=-1;
+  if((int)wifiConnected()!=last){ last=(int)wifiConnected(); screenDirty=true; }
 }
 
 /* ---------------- LEVELER (bubble level, uses accelerometer) ------ */
@@ -1367,6 +1468,9 @@ void setup(){
   rtcOK = rtcInit();
   if(!rtcOK) Serial.println("rtc begin failed");
 
+  // ---- WiFi: reconnect to saved network (non-blocking) + NTP auto-time ----
+  wifiBoot();
+
   // ---- BOOT side button (short button) = go home / wake ----
   pinMode(BOOT_BTN, INPUT_PULLUP);
   bootPrev = digitalRead(BOOT_BTN);
@@ -1411,6 +1515,7 @@ void enterScreen(){
     case SCR_BATTERY: drawBatteryStatic();break;
     case SCR_FLASH:   drawFlashStatic(); break;
     case SCR_SYSINFO: drawSysinfoStatic();break;
+    case SCR_WIFI:    drawWifi();          break;
   }
 }
 
@@ -1444,6 +1549,7 @@ void loop(){
     case SCR_BATTERY: handleBattery(ev);  break;
     case SCR_FLASH:   handleFlash(ev);    break;
     case SCR_SYSINFO: handleSysinfo(ev);  break;
+    case SCR_WIFI:    handleWifi(ev);     break;
   }
 
   // if a handler changed screens, let the next loop draw it fresh
@@ -1460,6 +1566,7 @@ void loop(){
     case SCR_TIMER:   tickTimer();     break;
     case SCR_BATTERY: tickBattery();   break;
     case SCR_SYSINFO: tickSysinfo();   break;
+    case SCR_WIFI:    tickWifi();      break;
     case SCR_AGENT: drawAgentDynamic();break;
     case SCR_SNAKE: stepSnake();       break;
     case SCR_MOLE:  stepMole();        break;

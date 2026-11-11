@@ -31,6 +31,7 @@ jobs:
           arduino-cli core install esp32:esp32@3.3.10
           arduino-cli lib install "GFX Library for Arduino"
           arduino-cli lib install "SensorLib"
+          arduino-cli lib install "WiFiManager"
 
       - name: Arrange the sketch folder (tolerates a root-level Alon.ino)
         run: |
@@ -44,12 +45,14 @@ jobs:
           fi
           # copy any companion headers (e.g. the avatar images) next to the sketch
           for h in *.h Alon/*.h; do [ -f "$h" ] && cp "$h" sketchdir/Alon/ || true; done
+          # custom partition table (dual-OTA) next to the sketch
+          for p in partitions.csv Alon/partitions.csv; do [ -f "$p" ] && cp "$p" sketchdir/Alon/ || true; done
           echo "sketch folder:"; ls -l sketchdir/Alon/
 
       - name: Compile
         run: |
           arduino-cli compile \
-            --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi,CDCOnBoot=cdc" \
+            --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=custom,PSRAM=opi,CDCOnBoot=cdc" \
             --export-binaries \
             --output-dir build \
             sketchdir/Alon
@@ -63,6 +66,9 @@ jobs:
             exit 1
           fi
           cp "$MERGED" out/Alon-flash-at-0x0.bin
+          # app-only image (NOT merged/bootloader/partitions) for wireless OTA updates
+          APP=$(find build -name "*.ino.bin" ! -name "*.merged.bin" | head -n1)
+          if [ -n "$APP" ]; then cp "$APP" out/Alon-ota-app.bin; echo "OTA app image: $APP"; fi
           ls -l out
 
       - name: Upload the .bin as a downloadable artifact
@@ -85,12 +91,13 @@ jobs:
         if: github.ref == 'refs/heads/main'
         run: |
           mkdir -p /tmp/pub && cp out/Alon-flash-at-0x0.bin /tmp/pub/Alon-flash-at-0x0.bin
+          [ -f out/Alon-ota-app.bin ] && cp out/Alon-ota-app.bin /tmp/pub/Alon-ota-app.bin
           cd /tmp/pub
           git init -q
           git config user.email "actions@github.com"
           git config user.name "github-actions"
           git checkout -q -b firmware-bin
-          echo "Latest Alon firmware. Flash Alon-flash-at-0x0.bin at offset 0x0." > README.md
+          printf 'Latest Alon firmware.\n- Alon-flash-at-0x0.bin : USB flash at offset 0x0\n- Alon-ota-app.bin      : wireless OTA app image (pulled by the device)\n' > README.md
           git add -A
           git commit -q -m "firmware build ${GITHUB_SHA}"
           git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" firmware-bin
