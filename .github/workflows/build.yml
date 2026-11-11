@@ -77,3 +77,22 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: out/Alon-flash-at-0x0.bin
+
+      # Publish the RAW .bin to a separate 'firmware-bin' branch so it can be
+      # downloaded directly from raw.githubusercontent.com (a plain .bin, not a
+      # zip) - helps when an org policy blocks the Actions artifact zip.
+      - name: Publish raw .bin to firmware-bin branch
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p /tmp/pub && cp out/Alon-flash-at-0x0.bin /tmp/pub/Alon-flash-at-0x0.bin
+          cd /tmp/pub
+          git init -q
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git checkout -q -b firmware-bin
+          echo "Latest Alon firmware. Flash Alon-flash-at-0x0.bin at offset 0x0." > README.md
+          git add -A
+          git commit -q -m "firmware build ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" firmware-bin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
