@@ -98,6 +98,7 @@ bool rtcOK = false;
 #define PMU_ADDR 0x34          // AXP2101 power chip
 
 int  brightness = 140;         // 20..250, saved in NVS
+bool screenOff = false;        // true = display blanked (power save)
 bool silent = false;          // mute tap/UI sounds (audio comes in Phase 2)
 bool bootPrev = true;          // BOOT button previous level (pulled up = high)
 
@@ -123,33 +124,73 @@ bool batteryCharging(){
 
 // Bounded I2C ping: does the IMU ACK its address? Prevents the library init
 // from hanging when the chip isn't answering, without touching its registers.
-bool imuProbe(){
-  Wire.beginTransmission(IMU_ADDR);
-  return Wire.endTransmission()==0;
+// --- Raw I2C QMI8658 driver (bypasses SensorLib which crashes on begin()) ---
+static uint8_t imuAddr = 0;   // detected address
+
+static void qmiWrite(uint8_t reg, uint8_t val){
+  Wire.beginTransmission(imuAddr);
+  Wire.write(reg); Wire.write(val);
+  Wire.endTransmission();
 }
+static uint8_t qmiRead1(uint8_t reg){
+  Wire.beginTransmission(imuAddr);
+  Wire.write(reg); Wire.endTransmission(false);
+  Wire.requestFrom(imuAddr,(uint8_t)1);
+  return Wire.available()?Wire.read():0;
+}
+static void qmiReadN(uint8_t reg, uint8_t *buf, uint8_t n){
+  Wire.beginTransmission(imuAddr);
+  Wire.write(reg); Wire.endTransmission(false);
+  Wire.requestFrom(imuAddr, n);
+  for(int i=0;i<n&&Wire.available();i++) buf[i]=Wire.read();
+}
+
 bool imuRead(){
   if(!imuOK) return false;
-  if(!imu.getDataReady()) return false;
-  imu.getAccelerometer(accX,accY,accZ);   // accelerometer only (gyro unused)
+  uint8_t st = qmiRead1(0x2E);             // STATUSINT register
+  if(!(st & 0x01)) return false;            // accel data not ready
+  uint8_t raw[6];
+  qmiReadN(0x35, raw, 6);                   // AX_L, AX_H, AY_L, AY_H, AZ_L, AZ_H
+  int16_t ax = (int16_t)((raw[1]<<8)|raw[0]);
+  int16_t ay = (int16_t)((raw[3]<<8)|raw[2]);
+  int16_t az = (int16_t)((raw[5]<<8)|raw[4]);
+  // 4G range: 1 LSB = 4/32768 g
+  accX = ax * (4.0f/32768.0f);
+  accY = ay * (4.0f/32768.0f);
+  accZ = az * (4.0f/32768.0f);
   return true;
 }
-// Lazy, one-shot IMU bring-up. Called when a motion app opens - never at boot,
-// so a missing/slow chip can't hang startup (and OTA recovery stays possible).
-// Uses Waveshare's own init: address 0x6A, 4G range, 1kHz ODR.
+
+// Lazy, one-shot IMU bring-up via raw registers. Called when a motion app opens -
+// never at boot, so a missing/slow chip can't hang startup.
 bool imuEnsure(){
   static bool tried=false;
   if(tried) return imuOK;
   tried=true;
-  // Auto-detect the QMI8658: try the L address (0x6B) then the H (0x6A).
-  uint8_t addr=0; const uint8_t cands[2]={0x6B,0x6A};
-  for(int i=0;i<2;i++){ Wire.beginTransmission(cands[i]); if(Wire.endTransmission()==0){ addr=cands[i]; break; } }
-  if(!addr) return false;                               // chip not found on the bus
-  if(imu.begin(Wire, addr, IIC_SDA, IIC_SCL)){
-    imu.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_1000Hz, SensorQMI8658::LPF_MODE_0);
-    imu.enableAccelerometer();
-    imuOK=true;
+  // Auto-detect: try 0x6B then 0x6A
+  const uint8_t cands[2]={0x6B,0x6A};
+  for(int i=0;i<2;i++){
+    Wire.beginTransmission(cands[i]);
+    if(Wire.endTransmission()==0){ imuAddr=cands[i]; break; }
   }
-  return imuOK;
+  if(!imuAddr) return false;
+  // Verify WHO_AM_I (register 0x00, expect 0x05 for QMI8658)
+  uint8_t wai = qmiRead1(0x00);
+  if(wai != 0x05){ imuAddr=0; return false; }
+  // Soft reset
+  qmiWrite(0x60, 0xB0); delay(20);          // RESET register
+  // CTRL1: SPI auto-inc, little-endian
+  qmiWrite(0x02, 0x60);
+  // CTRL2: Accel enable, 4G range, 1000Hz ODR
+  //   range[6:4]=0b010 (4G), ODR[3:0]=0b0011 (1000Hz)
+  qmiWrite(0x03, 0x23);
+  // CTRL5: no low-pass filter
+  qmiWrite(0x06, 0x00);
+  // CTRL7: enable accelerometer only (bit 0)
+  qmiWrite(0x08, 0x01);
+  delay(10);
+  imuOK = true;
+  return true;
 }
 
 // --- Clock: ESP32-S3 INTERNAL RTC. This board has NO external RTC chip (the
@@ -290,6 +331,7 @@ void handleBattery(const UiEvent &ev);
 void handleFlash(const UiEvent &ev);
 void handleSysinfo(const UiEvent &ev);
 bool appBack(const UiEvent &ev);
+void screenWake();
 
 #ifndef TOUCH_DEBUG
 #define TOUCH_DEBUG 0       // 1 = show a live touch readout (diagnostic)
@@ -714,9 +756,7 @@ void handleHome(const UiEvent &ev) {
 #define BK_H 38
 void drawBackBtn(){
   uint16_t ac=THEMES[pet.equipped].accent;
-  gfx->fillRoundRect(BK_X,BK_Y,BK_W,BK_H,12,C_TILE);          // dark pill
-  gfx->drawRoundRect(BK_X,BK_Y,BK_W,BK_H,12,ac);             // glowing accent edge
-  gfx->drawRoundRect(BK_X+1,BK_Y+1,BK_W-2,BK_H-2,11,ac);
+  gfx->fillRoundRect(BK_X,BK_Y,BK_W,BK_H,12,C_TILE);          // dark pill, no border
   textC("HOME", BK_X+BK_W/2, BK_Y+BK_H/2, 2, ac);
 }
 bool hitBack(const UiEvent &ev){
@@ -736,9 +776,9 @@ void drawCare() {
   gfx->fillScreen(C_BLACK);
   textC("CARE", LCD_W/2, 70, 3, THEMES[pet.equipped].accent);
   for (int i=0;i<3;i++){ Btn&b=careBtns[i];
-    gfx->fillRoundRect(b.x,b.y,b.w,b.h,14,C_DIMGREY);
-    gfx->drawRoundRect(b.x,b.y,b.w,b.h,14,THEMES[pet.equipped].accent);
-    textC(b.label,b.x+b.w/2,b.y+b.h/2,2,C_WHITE);
+    uint16_t ac = (i%2==0) ? C_CYAN : C_VIOLET;
+    gfx->fillRoundRect(b.x,b.y,b.w,b.h,14,C_TILE);
+    textC(b.label,b.x+b.w/2,b.y+b.h/2,2,ac);
   }
   char buf[24]; snprintf(buf,sizeof(buf),"%lu studs",(unsigned long)pet.studs);
   textC(buf, LCD_W/2, 120, 2, C_CYAN);
@@ -769,8 +809,7 @@ void drawShop(){
   for (int i=0;i<THEME_COUNT;i++){
     bool owned = pet.ownedMask & (1<<i);
     bool equip = pet.equipped==i;
-    gfx->fillRoundRect(100,y,266,46,12,C_DIMGREY);
-    gfx->drawRoundRect(100,y,266,46,12,THEMES[i].accent);
+    gfx->fillRoundRect(100,y,266,46,12,C_TILE);
     gfx->fillCircle(128,y+23,14,THEMES[i].accent);
     textL(THEMES[i].name,152,y+10,2,C_WHITE);
     char tag[16];
@@ -865,23 +904,23 @@ void drawSettings(){
   textC("SETTINGS", 233, 44, 3, THEMES[pet.equipped].accent);
   // Brightness
   textC("Brightness", 233, 88, 2, C_WHITE);
-  gfx->fillRoundRect(120,106,44,40,10,C_DIMGREY); textC("-",142,126,3,C_WHITE);
+  gfx->fillRoundRect(120,106,44,40,10,C_TILE); textC("-",142,126,3,C_CYAN);
   char b[8]; snprintf(b,sizeof(b),"%d",brightness); textC(b,233,126,2,C_CYAN);
-  gfx->fillRoundRect(302,106,44,40,10,C_DIMGREY); textC("+",324,126,3,C_WHITE);
+  gfx->fillRoundRect(302,106,44,40,10,C_TILE); textC("+",324,126,3,C_CYAN);
   // Clock
   int hh=0,mm=0,ss=0; if(rtcOK){ rtcGet(hh,mm,ss); }
   textC(rtcOK?"Clock":"Clock (no RTC)", 233, 168, 2, C_WHITE);
-  gfx->fillRoundRect(96,186,34,36,8,C_DIMGREY);  textC("-",113,204,2,C_WHITE);
+  gfx->fillRoundRect(96,186,34,36,8,C_TILE);  textC("-",113,204,2,C_VIOLET);
   char hb[6]; snprintf(hb,sizeof(hb),"%02d",hh);  textC(hb,160,204,2,C_CYAN);
-  gfx->fillRoundRect(178,186,34,36,8,C_DIMGREY); textC("+",195,204,2,C_WHITE);
+  gfx->fillRoundRect(178,186,34,36,8,C_TILE); textC("+",195,204,2,C_VIOLET);
   textC(":",233,204,2,C_WHITE);
-  gfx->fillRoundRect(254,186,34,36,8,C_DIMGREY); textC("-",271,204,2,C_WHITE);
+  gfx->fillRoundRect(254,186,34,36,8,C_TILE); textC("-",271,204,2,C_VIOLET);
   char mb[6]; snprintf(mb,sizeof(mb),"%02d",mm);  textC(mb,318,204,2,C_CYAN);
-  gfx->fillRoundRect(336,186,34,36,8,C_DIMGREY); textC("+",353,204,2,C_WHITE);
-  // Sleep + Sound toggles, then Reset
-  gfx->fillRoundRect(96,240,120,40,12,0x4A69);  textC(pet.sleeping?"WAKE":"SLEEP",156,260,2,C_WHITE);
-  gfx->fillRoundRect(250,240,120,40,12,silent?C_RED:0x2FEC); textC(silent?"SILENT":"SOUND",310,260,2,C_BLACK);
-  gfx->fillRoundRect(143,292,180,38,12,C_RED); textC("RESET",233,311,2,C_WHITE);
+  gfx->fillRoundRect(336,186,34,36,8,C_TILE); textC("+",353,204,2,C_VIOLET);
+  // Sleep + Sound + Screen Off toggles, then Reset
+  gfx->fillRoundRect(96,240,120,40,12,C_TILE);  textC(pet.sleeping?"WAKE":"SLEEP",156,260,2,C_CYAN);
+  gfx->fillRoundRect(250,240,120,40,12,C_TILE); textC(silent?"SILENT":"SOUND",310,260,2,silent?C_RED:C_CYAN);
+  gfx->fillRoundRect(143,292,180,38,12,C_TILE); textC("RESET",233,311,2,C_RED);
   drawBackBtn();
 }
 void handleSettings(const UiEvent &ev){
@@ -917,9 +956,9 @@ void drawGames(){
   gfx->fillScreen(C_BLACK);
   textC("GAMES", LCD_W/2, 68, 3, THEMES[pet.equipped].accent);
   for (int i=0;i<3;i++){ Btn&b=gameBtns[i];
-    gfx->fillRoundRect(b.x,b.y,b.w,b.h,14,C_DIMGREY);
-    gfx->drawRoundRect(b.x,b.y,b.w,b.h,14,THEMES[pet.equipped].accent);
-    textC(b.label,b.x+b.w/2,b.y+b.h/2,2,C_WHITE);
+    uint16_t ac = (i%2==0) ? C_CYAN : C_VIOLET;
+    gfx->fillRoundRect(b.x,b.y,b.w,b.h,14,C_TILE);
+    textC(b.label,b.x+b.w/2,b.y+b.h/2,2,ac);
   }
   textC("win studs!", LCD_W/2, 326, 1, C_GREY);
   drawBackBtn();
@@ -1102,9 +1141,9 @@ void decayNeeds(){
 uint32_t lastShake=0;
 void checkShake(){
   if(!imuOK)return;
-  if(!imu.getDataReady())return;
-  float ax,ay,az;
-  if(!imu.getAccelerometer(ax,ay,az))return;
+  float ax=accX,ay=accY,az=accZ;
+  if(!imuRead())return;
+  ax=accX; ay=accY; az=accZ;
   float mag=sqrtf(ax*ax+ay*ay+az*az);
   if(mag>2.2f && millis()-lastShake>1500){     // ~2.2g jolt
     lastShake=millis();
@@ -1175,11 +1214,9 @@ void drawApps(){
     int idx=start+i; if(idx>=APP_COUNT) break;
     int x,y; appTileXY(i,x,y);
     uint16_t ac = (idx%2==0) ? C_CYAN : C_VIOLET;
-    gfx->fillRoundRect(x,y,130,88,16,C_TILE);                 // dark tile
-    gfx->drawRoundRect(x,y,130,88,16,ac);                     // glowing accent border
-    gfx->drawRoundRect(x+1,y+1,128,86,15,ac);
+    gfx->fillRoundRect(x,y,130,88,16,C_TILE);                 // dark tile, no border
     drawAppIcon(APPS[idx].name, x+65, y+30, ac);
-    textC(APPS[idx].name, x+65, y+68, 2, C_WHITE);
+    textC(APPS[idx].name, x+65, y+68, 2, ac);
   }
   int pages=(APP_COUNT+APPS_PER_PAGE-1)/APPS_PER_PAGE;
   for(int p=0;p<pages;p++)
@@ -1245,9 +1282,9 @@ void drawWifi(){
     textC("tap SETUP, then join", 233, 138, 1, C_GREY);
     textC("'Alon-Setup' on phone", 233, 156, 1, C_GREY);
   }
-  gfx->fillRoundRect(96,186,120,44,12,0x2FEC);     textC("SETUP",156,208,2,C_BLACK);
-  gfx->fillRoundRect(250,186,120,44,12,C_DIMGREY); textC("FORGET",310,208,2,C_WHITE);
-  gfx->fillRoundRect(133,246,200,46,12,THEMES[pet.equipped].accent); textC("CHECK UPDATE",233,269,2,C_BLACK);
+  gfx->fillRoundRect(96,186,120,44,12,C_TILE);      textC("SETUP",156,208,2,C_CYAN);
+  gfx->fillRoundRect(250,186,120,44,12,C_TILE);    textC("FORGET",310,208,2,C_VIOLET);
+  gfx->fillRoundRect(133,246,200,46,12,C_TILE);    textC("CHECK UPDATE",233,269,2,C_CYAN);
   if(otaMsg.length()) textC(otaMsg.c_str(), 233, 316, 1, C_YELLOW);
   drawBackBtn();
 }
@@ -1346,7 +1383,7 @@ void handleMarble(const UiEvent &ev){ if(appBack(ev)) return; if(ev.type==EV_HOL
 
 /* ---------------- STEP COUNTER (accel peak detect) --------------- */
 long stepCount=0;
-void drawStepsStatic(){ imuEnsure(); appHeader("STEPS"); gfx->fillRoundRect(133,300,200,40,10,C_DIMGREY); textC("RESET",233,320,2,C_WHITE); drawBackBtn(); }
+void drawStepsStatic(){ imuEnsure(); appHeader("STEPS"); gfx->fillRoundRect(133,300,200,40,10,C_TILE); textC("RESET",233,320,2,C_CYAN); drawBackBtn(); }
 void tickSteps(){
   if(imuOK && imuRead()){
     float mag=sqrtf(accX*accX+accY*accY+accZ*accZ);
@@ -1392,8 +1429,8 @@ void handleClock(const UiEvent &ev){ appBack(ev); }
 uint32_t swStart=0, swAccum=0; bool swRun=false;
 void drawStopwatchStatic(){
   appHeader("STOPWATCH");
-  gfx->fillRoundRect(96,300,120,42,10,C_GREEN); textC(swRun?"STOP":"START",156,321,2,C_BLACK);
-  gfx->fillRoundRect(250,300,120,42,10,C_DIMGREY); textC("RESET",310,321,2,C_WHITE);
+  gfx->fillRoundRect(96,300,120,42,10,C_TILE); textC(swRun?"STOP":"START",156,321,2,swRun?C_RED:C_CYAN);
+  gfx->fillRoundRect(250,300,120,42,10,C_TILE); textC("RESET",310,321,2,C_VIOLET);
   drawBackBtn();
 }
 void tickStopwatch(){
@@ -1416,9 +1453,9 @@ void handleStopwatch(const UiEvent &ev){
 int timerMin=5; uint32_t tmrEnd=0; bool timerRun=false; bool timerDone=false;
 void drawTimerStatic(){
   appHeader("TIMER");
-  gfx->fillRoundRect(96,150,44,44,10,C_DIMGREY); textC("-",118,172,3,C_WHITE);
-  gfx->fillRoundRect(326,150,44,44,10,C_DIMGREY); textC("+",348,172,3,C_WHITE);
-  gfx->fillRoundRect(96,300,274,42,10,timerRun?C_RED:C_GREEN); textC(timerRun?"STOP":"START",233,321,2,C_BLACK);
+  gfx->fillRoundRect(96,150,44,44,10,C_TILE); textC("-",118,172,3,C_VIOLET);
+  gfx->fillRoundRect(326,150,44,44,10,C_TILE); textC("+",348,172,3,C_VIOLET);
+  gfx->fillRoundRect(96,300,274,42,10,C_TILE); textC(timerRun?"STOP":"START",233,321,2,timerRun?C_RED:C_CYAN);
   drawBackBtn();
 }
 void tickTimer(){
@@ -1525,7 +1562,7 @@ void setup(){
   // available" until we bring it up through a non-blocking path.
   // IMU (QMI8658) starts lazily when a motion app opens (correct addr 0x6A),
   // so a missing/slow chip can never stall boot.
-  (void)imuProbe;
+  // IMU initialized lazily when a motion app opens (imuEnsure)
 
   // ---- Real-time clock (PCF85063): start the oscillator so it actually ticks ----
   rtcOK = rtcInit();
@@ -1546,12 +1583,25 @@ void setup(){
   screenDirty = true;
 }
 
-// SHORT side button (BOOT): wake + jump home from anywhere.
+// SHORT side button (BOOT): toggle screen on/off. When screen is off, press
+// turns it back on (to wherever you were). When screen is on, press turns it off.
+void screenWake(){
+  if(!screenOff) return;
+  screenOff = false;
+  gfx->setBrightness(brightness);
+  screenDirty = true;                         // redraw current screen
+}
 void checkBoot(){
   bool lvl = digitalRead(BOOT_BTN);         // LOW = pressed
   if(bootPrev && !lvl){
-    if(pet.sleeping){ pet.sleeping=false; gfx->setBrightness(brightness); }
-    if(screen!=SCR_HOME){ screen=SCR_HOME; screenDirty=true; }
+    if(screenOff){
+      screenWake();
+    } else {
+      // Turn screen off
+      screenOff = true;
+      gfx->fillScreen(C_BLACK);
+      gfx->setBrightness(0);
+    }
   }
   bootPrev = lvl;
 }
@@ -1587,6 +1637,12 @@ void loop(){
   touchTestLoop();
   return;
 #endif
+  if(screenOff){
+    // Screen is off - only side button (handled by checkBoot) or touch wakes it
+    UiEvent ev = pollGesture();
+    if(ev.type == EV_DOWN || ev.type == EV_TAP) screenWake();
+    return;
+  }
   if(screenDirty){ screenDirty=false; enterScreen(); return; }
 
   UiEvent ev = pollGesture();
