@@ -42,6 +42,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <Preferences.h>
+#include <time.h>
+#include <sys/time.h>
 #include "Arduino_GFX_Library.h"
 #include "TouchDrvCSTXXX.hpp"
 #include "SensorQMI8658.hpp"
@@ -128,38 +130,35 @@ bool imuRead(){
   return true;
 }
 
-// --- PCF85063 real-time clock via direct registers (non-blocking) ---
-uint8_t bcd2dec(uint8_t b){ return (uint8_t)((b>>4)*10 + (b&0x0F)); }
-uint8_t dec2bcd(uint8_t d){ return (uint8_t)(((d/10)<<4) | (d%10)); }
-bool rtcProbe(){ Wire.beginTransmission(RTC_ADDR); return Wire.endTransmission()==0; }
+// --- Clock: ESP32-S3 INTERNAL RTC. This board has NO external RTC chip (the
+//     schematic shows a 32.768kHz crystal wired to the ESP32's XTAL_32K pins and
+//     a VBACKUP rail - not a PCF85063). So we keep time with the chip's own clock
+//     via time()/settimeofday(), which ticks every second while powered. Later,
+//     WiFi/NTP can set it automatically. ---
 bool rtcGet(int &hh,int &mm,int &ss){
-  Wire.beginTransmission(RTC_ADDR); Wire.write(0x04);
-  if(Wire.endTransmission(true)!=0) return false;
-  if(Wire.requestFrom(RTC_ADDR,3)!=3) return false;
-  ss=bcd2dec(Wire.read()&0x7F); mm=bcd2dec(Wire.read()&0x7F); hh=bcd2dec(Wire.read()&0x3F);
+  time_t now = time(nullptr);
+  struct tm t; localtime_r(&now, &t);
+  hh = t.tm_hour; mm = t.tm_min; ss = t.tm_sec;
   return true;
 }
 void rtcSet(int hh,int mm,int ss){
-  // Control_1 = 0x00: clears STOP (bit5) so the oscillator RUNS, selects 24-hour
-  // mode (bit1=0), normal mode. This is the step the old code was missing.
-  Wire.beginTransmission(RTC_ADDR); Wire.write(0x00); Wire.write((uint8_t)0x00); Wire.endTransmission(true);
-  // Writing seconds with bit7 (OS flag) = 0 also clears the oscillator-stop flag.
-  Wire.beginTransmission(RTC_ADDR); Wire.write(0x04);
-  Wire.write(dec2bcd((uint8_t)ss)&0x7F); Wire.write(dec2bcd((uint8_t)mm)); Wire.write(dec2bcd((uint8_t)hh));
-  Wire.endTransmission(true);
+  time_t now = time(nullptr);
+  struct tm t; localtime_r(&now, &t);
+  t.tm_hour = hh; t.tm_min = mm; t.tm_sec = ss;
+  time_t nt = mktime(&t);
+  struct timeval tv; tv.tv_sec = nt; tv.tv_usec = 0;
+  settimeofday(&tv, nullptr);
 }
-// Start the RTC at boot. The #1 reason a PCF85063 "doesn't tick": the STOP bit
-// in Control_1 is set, or the oscillator-stop flag is set after power loss.
-// Mirrors Waveshare's SensorLib PCF85063 driver: clear STOP so it runs; if the
-// oscillator had stopped, seed a sane time so a running clock shows immediately.
 bool rtcInit(){
-  if(!rtcProbe()) return false;
-  Wire.beginTransmission(RTC_ADDR); Wire.write(0x00); Wire.write((uint8_t)0x00); Wire.endTransmission(true); // STOP=0 -> run, 24h
-  uint8_t sec=0x80;
-  Wire.beginTransmission(RTC_ADDR); Wire.write(0x04);
-  if(Wire.endTransmission(true)==0 && Wire.requestFrom(RTC_ADDR,1)==1) sec=Wire.read();
-  if(sec & 0x80) rtcSet(12,0,0);   // oscillator had stopped -> seed noon (also clears OS flag)
-  return true;
+  time_t now = time(nullptr);
+  struct tm t; localtime_r(&now, &t);
+  if(t.tm_year < 120){                 // unset (before year 2020) -> seed a sane time so it ticks now
+    struct tm s = {}; s.tm_year = 126; s.tm_mon = 0; s.tm_mday = 1; s.tm_hour = 12; s.tm_min = 0; s.tm_sec = 0;
+    time_t nt = mktime(&s);
+    struct timeval tv; tv.tv_sec = nt; tv.tv_usec = 0;
+    settimeofday(&tv, nullptr);
+  }
+  return true;                          // internal clock is always available
 }
 
 /* ----------------------- COLOR / THEME ------------------------------ */
@@ -586,25 +585,17 @@ void drawHeartAt(int cx,int cy,uint16_t col){
   gfx->fillCircle(cx-5,cy,5,col); gfx->fillCircle(cx+5,cy,5,col);
   gfx->fillTriangle(cx-10,cy+1,cx+10,cy+1,cx,cy+13,col);
 }
-// Cinematic fade between two full-screen avatar frames: dim the panel to black,
-// swap to the real artwork underneath, fade back up. Uses only full-frame blits
-// (reliable) and the panel brightness command - no frame-cut, no drawn shapes.
-void fadeToFrame(const uint16_t* img){
-  int b = brightness; if(b < 30) b = 140;          // guard against a near-black base
-  int st = b/6 > 0 ? b/6 : 1;
-  for(int v=b; v>0; v-=st){ gfx->setBrightness(v<0?0:v); delay(16); }
-  gfx->setBrightness(0);
-  blitFull(img);                                   // swap artwork while dark
-  for(int v=0; v<=b; v+=st){ gfx->setBrightness(v>b?b:v); delay(16); }
-  gfx->setBrightness(b);
-}
-// Pet reaction: Alon reacts to your touch with his real "celebration" avatar,
-// faded in and back out - an animated mood change on the actual artwork.
+// Pet reaction: an INSTANT animation ON the same avatar - a burst of sparkles
+// and rising hearts drawn over Alon's real idle image. The avatar itself never
+// changes and the screen never blanks; it just comes alive the moment you touch.
 void triggerPet(){
-  fadeToFrame(img_celebration);   // real happy avatar
-  delay(820);                     // hold the reaction a beat
-  fadeToFrame(homeImg());         // transition back to idle (or sleep)
-  screenDirty = true;             // repaint HUD (clock + battery) cleanly
+  petAnimOn = true; petAnimStart = millis(); lastPetFrame = 0;
+  for(int i=0;i<18;i++){
+    float a=(i/18.0f)*6.2832f, sp=2.2f+(esp_random()%120)/40.0f;
+    sparks[i].x=233; sparks[i].y=210;
+    sparks[i].vx=cosf(a)*sp; sparks[i].vy=sinf(a)*sp-2.0f;
+    sparks[i].col=(i%3==0)?C_YELLOW:(i%3==1)?C_CYAN:0xF81F;
+  }
 }
 void animateAvatar(){
   if(!petAnimOn) return;
