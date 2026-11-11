@@ -559,66 +559,58 @@ void addXP(uint32_t amt) {
 }
 void reward(uint32_t studs, uint32_t xp) { pet.studs += studs; addXP(xp); }
 
-/* ----------------------- AVATAR (procedural) ------------------------
-   A LEGO-ish minifig head drawn in code. No image arrays needed.
-   face: 0 idle  1 happy  2 sleep  3 agent  4 sad/sick
-   To use your real artwork later, replace drawAvatar() with a call that
-   blits a 466x466 RGB565 array from PROGMEM.                           */
-void drawAvatar(int face, int cx, int cy, int scale /*percent 100=normal*/) {
-  Theme &th = THEMES[pet.equipped];
-  int r = 70 * scale / 100;
-  // head (rounded square)
-  gfx->fillRoundRect(cx - r, cy - r, 2 * r, 2 * r, r / 2, th.head);
-  // stud on top
-  gfx->fillRoundRect(cx - r / 4, cy - r - r / 6, r / 2, r / 4, r / 8, th.head);
-  gfx->drawRoundRect(cx - r / 4, cy - r - r / 6, r / 2, r / 4, r / 8, C_DIMGREY);
+/* ----------------------- AVATAR EXPRESSIONS ------------------------- */
+// Expression indices: 0=neutral, 1=happy, 2=sleepy, 3=sad
+enum Expression : uint8_t { EXPR_NEUTRAL=0, EXPR_HAPPY=1, EXPR_SLEEPY=2, EXPR_SAD=3 };
+const uint16_t* EXPR_IMGS[4] = { img_neutral, img_happy, img_sleepy, img_sad };
 
-  int eyeY = cy - r / 5;
-  int eyeDX = r / 2;
-  int eyeR = r / 7;
-  if (face == 2) {               // sleeping: closed eyes
-    gfx->drawFastHLine(cx - eyeDX - eyeR, eyeY, 2 * eyeR, C_BLACK);
-    gfx->drawFastHLine(cx + eyeDX - eyeR, eyeY, 2 * eyeR, C_BLACK);
-    textC("z", cx + r, cy - r, 2, C_CYAN);
-  } else {
-    gfx->fillCircle(cx - eyeDX, eyeY, eyeR, C_BLACK);
-    gfx->fillCircle(cx + eyeDX, eyeY, eyeR, C_BLACK);
-    // little catchlight
-    gfx->fillCircle(cx - eyeDX + eyeR / 3, eyeY - eyeR / 3, eyeR / 3, C_WHITE);
-    gfx->fillCircle(cx + eyeDX + eyeR / 3, eyeY - eyeR / 3, eyeR / 3, C_WHITE);
-  }
+Expression  curExpr     = EXPR_NEUTRAL;    // current displayed expression
+Expression  baseExpr    = EXPR_NEUTRAL;    // expression when not doing a blink/reaction
+uint32_t    exprOverrideEnd = 0;           // millis when a temporary expression reverts
+bool        blinkActive = false;
+uint32_t    nextBlink   = 0;               // when next blink starts
 
-  int mY = cy + r / 3;
-  if (face == 1) {               // big smile
-    gfx->fillArc(cx, mY - r / 4, r / 2, r / 2 - 6, 20, 160, C_BLACK);
-  } else if (face == 4) {        // frown
-    gfx->fillArc(cx, mY + r / 2, r / 2, r / 2 - 5, 200, 340, C_BLACK);
-  } else if (face == 3) {        // agent: neutral + visor glow
-    gfx->drawFastHLine(cx - r / 3, mY, 2 * r / 3, C_BLACK);
-  } else {                       // idle: gentle smile
-    gfx->fillArc(cx, mY - r / 6, r / 2 - 4, r / 2 - 9, 30, 150, C_BLACK);
-  }
+// Draw just the avatar into its zone (no full-screen blit)
+void blitAvatar(Expression e){
+  gfx->draw16bitRGBBitmap(ALON_X, ALON_Y, EXPR_IMGS[e], ALON_IMG_W, ALON_IMG_H);
+  curExpr = e;
+}
 
-  if (face == 3) {               // agent aura ring
-    for (int i = 0; i < 3; i++)
-      gfx->drawCircle(cx, cy, r + 10 + i * 7, th.accent);
+// Pick the base expression from context (time, battery, charging)
+Expression autoExpression(){
+  int bat = batteryPercent();
+  if(bat >= 0 && bat < 10) return EXPR_SLEEPY;     // dying
+  if(bat >= 0 && bat < 20) return EXPR_SAD;         // low battery
+  if(batteryCharging())    return EXPR_HAPPY;        // charging = happy
+
+  // Time-of-day mood
+  int hh = -1, mm = 0, ss = 0;
+  rtcGet(hh, mm, ss);
+  if(hh >= 0){
+    if(hh >= 22 || hh < 7) return EXPR_SLEEPY;      // nighttime
+    if(hh >= 7 && hh < 10) return EXPR_HAPPY;        // morning energy
   }
+  return EXPR_NEUTRAL;
+}
+
+// Trigger a temporary expression (e.g. happy on tap, reverts after duration)
+void triggerExpression(Expression e, uint32_t durationMs){
+  exprOverrideEnd = millis() + durationMs;
+  blitAvatar(e);
 }
 
 /* celebration splash on level up */
 void celebrate() {
-  gfx->draw16bitRGBBitmap(0, 0, img_celebration, 466, 466);   // full-screen render
+  gfx->fillScreen(C_BLACK);
+  blitAvatar(EXPR_HAPPY);
   char buf[24]; snprintf(buf, sizeof(buf), "LEVEL %d!", pet.level);
-  gfx->fillRect(60, 24, 346, 30, C_BLACK);
   textC(buf, LCD_W / 2, 38, 3, THEMES[pet.equipped].accent);
-  gfx->fillRect(130, 420, 206, 24, C_BLACK);
   textC("+20 studs", LCD_W / 2, 432, 2, C_WHITE);
   delay(1400);
   screenDirty = true;
 }
 
 /* ----------------------- STAT BAR WIDGET ---------------------------- */
-// Draws one labelled bar; caches last value so it only repaints on change.
 int lastBar[4] = {-1,-1,-1,-1};
 void drawStatBar(int idx, const char *label, int val, int x, int y, int w) {
   val = clampi(val, 0, 100);
@@ -634,19 +626,10 @@ void drawStatBar(int idx, const char *label, int val, int x, int y, int w) {
 }
 
 /* ===================================================================
-   ANIMATED AVATAR  (home screen)
-   Draws Alon's face with squash/stretch, blinking, and a pet reaction
-   (bounce + happy eyes + rising hearts). Only the avatar box is redrawn.
+   PET REACTION ANIMATION  (sparkles + hearts over avatar zone)
    =================================================================== */
-// The avatar now fills the whole 466x466 screen (full artwork, uncropped).
 bool     petAnimOn = false;
 uint32_t petAnimStart = 0;
-
-const uint16_t* homeImg(){ return pet.sleeping ? img_sleep : img_idle; }
-void blitFull(const uint16_t* img){ gfx->draw16bitRGBBitmap(0, 0, img, 466, 466); }
-
-// Pet reaction: a lively particle burst (sparkles + rising hearts) animated
-// over Alon's real idle image - no frame-swap, it actually moves.
 #define PET_MS 780
 struct Spark { float x,y,vx,vy; uint16_t col; };
 Spark sparks[18];
@@ -655,101 +638,288 @@ void drawHeartAt(int cx,int cy,uint16_t col){
   gfx->fillCircle(cx-5,cy,5,col); gfx->fillCircle(cx+5,cy,5,col);
   gfx->fillTriangle(cx-10,cy+1,cx+10,cy+1,cx,cy+13,col);
 }
-// Pet reaction: an INSTANT animation ON the same avatar - a burst of sparkles
-// and rising hearts drawn over Alon's real idle image. The avatar itself never
-// changes and the screen never blanks; it just comes alive the moment you touch.
 void triggerPet(){
   petAnimOn = true; petAnimStart = millis(); lastPetFrame = 0;
+  int acx = ALON_X + ALON_IMG_W/2, acy = ALON_Y + ALON_IMG_H/2;
   for(int i=0;i<18;i++){
     float a=(i/18.0f)*6.2832f, sp=2.2f+(esp_random()%120)/40.0f;
-    sparks[i].x=233; sparks[i].y=210;
+    sparks[i].x=acx; sparks[i].y=acy;
     sparks[i].vx=cosf(a)*sp; sparks[i].vy=sinf(a)*sp-2.0f;
     sparks[i].col=(i%3==0)?C_YELLOW:(i%3==1)?C_CYAN:0xF81F;
   }
 }
-void animateAvatar(){
+void animatePetReaction(){
   if(!petAnimOn) return;
   uint32_t now=millis(); int age=now-petAnimStart;
-  if(age>=PET_MS){ petAnimOn=false; screenDirty=true; return; }   // settle back to home
+  if(age>=PET_MS){ petAnimOn=false; blitAvatar(curExpr); return; }
   if(now-lastPetFrame<40) return; lastPetFrame=now;
-  blitFull(img_idle);                         // re-blit clears last frame's particles
+  blitAvatar(EXPR_HAPPY);     // re-blit clears last frame's particles
   for(int i=0;i<18;i++){
     sparks[i].x+=sparks[i].vx; sparks[i].y+=sparks[i].vy; sparks[i].vy+=0.18f;
     int sx=(int)sparks[i].x, sy=(int)sparks[i].y;
     if(sx>3&&sx<463&&sy>3&&sy<463) gfx->fillCircle(sx,sy,3,sparks[i].col);
   }
-  int hy = 205 - age*70/PET_MS;               // hearts float up
-  drawHeartAt(205,hy,0xF81F); drawHeartAt(262,hy-14,C_RED);
+  int acx = ALON_X + ALON_IMG_W/2;
+  int hy = (ALON_Y + ALON_IMG_H/2) - age*70/PET_MS;
+  drawHeartAt(acx-28,hy,0xF81F); drawHeartAt(acx+29,hy-14,C_RED);
 }
 
 /* ===================================================================
-   HOME SCREEN
+   ZONE-BASED HOME SCREEN
+   Layout from Muse's zone map (466x466 round AMOLED):
+     CLOCK   — top centre:  digits (133-333, 26-78), date (143-323, 84-112)
+     WEATHER — right:       icon (352-438, 150-236), temp centre (395,262)
+     AVATAR  — centre:      figure (175-291, 134-340)
+     BATTERY — bottom arc:  radius 208, thickness 10, 140°-220° (0°=12 o'clock CW)
+               percent text centre (233, 402)
    =================================================================== */
-// Bottom menu buttons (kept inside the visible circle y<=376)
-struct Btn { int x, y, w, h; const char *label; };
-Btn homeBtns[4] = {
-  { 96, 322, 128, 44, "CARE"  },
-  {242, 322, 128, 44, "PLAY"  },
-  { 96, 372 - 0,  0, 0, "" },   // placeholder (unused)
-  {242, 372 - 0,  0, 0, "" },
-};
-// Second row inside circle
-Btn homeBtns2[2] = {
-  { 96, 268, 128, 44, "SHOP" },
-  {242, 268, 128, 44, "Zzz"  },
-};
 
-uint32_t lastStudsShown = 0xFFFFFFFF;
-int lastLevelShown = -1;
+// ---- Weather placeholder (updated via WiFi later) ----
+int   weatherTemp    = -99;           // Celsius; -99 = unknown
+int   weatherCode    = -1;            // 0=sun, 1=cloud, 2=rain, 3=snow, etc.
+char  weatherCond[16] = "";           // e.g. "Cloudy"
 
-void miniBar(int val,int x,int y,int w){
-  val=clampi(val,0,100);
-  gfx->fillRoundRect(x,y,w,10,4,C_DIMGREY);
-  uint16_t c=val>50?C_GREEN:(val>25?C_YELLOW:C_RED);
-  int fw=(w-2)*val/100; gfx->fillRoundRect(x+1,y+1,fw<3?3:fw,8,3,c);
+// ---- Draw weather icon (simple glyphs) ----
+void drawWeatherIcon(int cx, int cy){
+  if(weatherCode <= 0){
+    // Sun
+    gfx->fillCircle(cx, cy, 18, C_YELLOW);
+    for(int i=0;i<8;i++){
+      float a = i * 0.7854f;
+      int x1 = cx + (int)(cosf(a)*24), y1 = cy + (int)(sinf(a)*24);
+      int x2 = cx + (int)(cosf(a)*32), y2 = cy + (int)(sinf(a)*32);
+      gfx->drawLine(x1,y1,x2,y2,C_YELLOW);
+    }
+  } else if(weatherCode == 1){
+    // Cloud
+    gfx->fillCircle(cx-10, cy, 14, C_GREY);
+    gfx->fillCircle(cx+10, cy-4, 16, C_GREY);
+    gfx->fillCircle(cx+6,  cy+8, 12, C_GREY);
+  } else if(weatherCode == 2){
+    // Rain cloud + drops
+    gfx->fillCircle(cx-8, cy-8, 12, C_GREY);
+    gfx->fillCircle(cx+8, cy-10, 14, C_GREY);
+    gfx->fillRect(cx-14, cy-2, 30, 10, C_GREY);
+    for(int i=0;i<3;i++){
+      int dx = cx - 10 + i*10, dy = cy + 12 + (i%2)*6;
+      gfx->fillRect(dx, dy, 2, 8, C_CYAN);
+    }
+  } else {
+    // Snow
+    gfx->fillCircle(cx-8, cy-8, 12, C_GREY);
+    gfx->fillCircle(cx+8, cy-10, 14, C_GREY);
+    for(int i=0;i<4;i++){
+      int dx = cx - 12 + i*8, dy = cy + 10 + (i%2)*8;
+      gfx->fillCircle(dx, dy, 2, C_WHITE);
+    }
+  }
 }
 
+// ---- Draw battery arc ----
+// Arc parameters: centre (233,233), radius 208, thickness 10
+// Span: 140° to 220° (0°=12 o'clock, clockwise)
+// Fill direction: 220° → 140° (left to right)
+void drawBatteryArc(int pct){
+  if(pct < 0) pct = 0;
+  if(pct > 100) pct = 100;
+  uint16_t fg = pct < 20 ? C_RED : (pct < 50 ? C_ORANGE : C_GREEN);
+  // Background arc (grey)
+  gfx->fillArc(233, 233, 213, 203, 140, 220, C_DIMGREY);
+  // Filled arc: from 220° backwards (left to right visually)
+  if(pct > 0){
+    float fillDeg = 80.0f * pct / 100.0f;   // 80° total span
+    float endAngle = 220.0f;
+    float startAngle = endAngle - fillDeg;
+    gfx->fillArc(233, 233, 213, 203, (int)startAngle, (int)endAngle, fg);
+  }
+}
+
+// ---- Home screen static draw (called once on screen entry) ----
 void drawHomeStatic() {
-  blitFull(homeImg());                       // full-screen LEGO avatar art
-  lastStudsShown = 0xFFFFFFFF; lastLevelShown = -1;
+  gfx->fillScreen(C_BLACK);
+
+  // Set base expression from context
+  baseExpr = autoExpression();
+  if(pet.sleeping) baseExpr = EXPR_SLEEPY;
+  blitAvatar(baseExpr);
+
+  // Init blink timer
+  nextBlink = millis() + 3000 + (esp_random() % 5000);  // 3-8 sec
+
+  // Force all zones to draw on first frame
+  // (drawHomeDynamic will handle clock, weather, battery)
 }
 
-// A clean little battery glyph with fill.
-void drawBatteryIcon(int x,int y,int pct){
-  gfx->drawRoundRect(x,y,34,16,3,C_WHITE);
-  gfx->fillRect(x+34,y+5,3,6,C_WHITE);
-  if(pct>=0){ uint16_t c=pct<20?C_RED:(pct<50?0xFD20:C_GREEN);
-    int w=28*pct/100; gfx->fillRoundRect(x+3,y+3,w<3?3:w,10,2,c); }
-}
+// Cached values to avoid redrawing unchanged zones
+static int  hm_lastHH = -2, hm_lastMM = -2, hm_lastBat = -2;
+static int  hm_lastTemp = -999;
+static bool hm_lastCharging = false;
 
 void drawHomeDynamic() {
-  if (petAnimOn) return;                      // don't draw HUD over the reaction
-  static uint32_t lastClk=0, lastBatMs=0;
-  static int hh=-1, mm=-1, ss=0, bat=-1, lastSec=-2, lastBat=-2;
-  uint32_t now=millis();
-  if (rtcOK && now-lastClk>500){ lastClk=now; rtcGet(hh,mm,ss); }
-  if (now-lastBatMs>5000 || lastBat==-2){ lastBatMs=now; bat=batteryPercent(); }
+  if(petAnimOn) return;    // sparkle animation is running
+  uint32_t now = millis();
 
-  // Top HUD: live clock + battery glyph (centre-top, inside the circle). No level/studs.
-  if (ss!=lastSec || bat!=lastBat){
-    lastSec=ss; lastBat=bat;
-    gfx->fillRoundRect(120, 24, 226, 40, 12, C_BLACK);
-    char c[8]; if(hh>=0) snprintf(c,sizeof(c),"%02d:%02d",hh,mm); else snprintf(c,sizeof(c),"--:--");
-    textC(c, 192, 44, 2, C_CYAN);
-    drawBatteryIcon(272, 36, bat);
+  // ---- CLOCK ZONE (top centre) ----
+  static uint32_t lastClkMs = 0;
+  int hh = -1, mm = 0, ss = 0;
+  if(now - lastClkMs > 500){ lastClkMs = now; rtcGet(hh, mm, ss); }
+  else { rtcGet(hh, mm, ss); }
+
+  if(hh != hm_lastHH || mm != hm_lastMM){
+    hm_lastHH = hh; hm_lastMM = mm;
+    // Clear clock area
+    gfx->fillRect(133, 26, 200, 90, C_BLACK);
+    // Time digits (large, ~44px = size 5-ish, but we use size 4 for clean fit)
+    char tbuf[8];
+    if(hh >= 0) snprintf(tbuf, sizeof(tbuf), "%02d:%02d", hh, mm);
+    else        snprintf(tbuf, sizeof(tbuf), "--:--");
+    textC(tbuf, 233, 56, 4, C_WHITE);
+
+    // Date line
+    time_t tn = time(nullptr);
+    struct tm tmm; localtime_r(&tn, &tmm);
+    const char *days[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+    const char *months[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                            "Jul","Aug","Sep","Oct","Nov","Dec"};
+    char dbuf[20];
+    if(tmm.tm_year > 120)
+      snprintf(dbuf, sizeof(dbuf), "%s %d %s", days[tmm.tm_wday], tmm.tm_mday, months[tmm.tm_mon]);
+    else
+      snprintf(dbuf, sizeof(dbuf), "---");
+    textC(dbuf, 233, 102, 2, C_GREY);
+  }
+
+  // ---- BATTERY ZONE (bottom arc + percentage) ----
+  static uint32_t lastBatMs = 0;
+  int bat = -1;
+  bool charging = false;
+  if(now - lastBatMs > 5000 || hm_lastBat == -2){
+    lastBatMs = now;
+    bat = batteryPercent();
+    charging = batteryCharging();
+  } else {
+    bat = hm_lastBat; charging = hm_lastCharging;
+  }
+
+  if(bat != hm_lastBat || charging != hm_lastCharging){
+    hm_lastBat = bat; hm_lastCharging = charging;
+    drawBatteryArc(bat);
+    // Percentage text
+    gfx->fillRect(183, 386, 100, 36, C_BLACK);
+    char bbuf[8];
+    if(bat >= 0) snprintf(bbuf, sizeof(bbuf), "%d%%", bat);
+    else         snprintf(bbuf, sizeof(bbuf), "--%%");
+    uint16_t bcol = charging ? C_GREEN : (bat < 20 ? C_RED : C_CYAN);
+    textC(bbuf, 233, 406, 3, bcol);
+    // Charging indicator
+    if(charging){
+      textC("charging", 233, 378, 1, C_GREEN);
+    }
+  }
+
+  // ---- WEATHER ZONE (right side) ----
+  if(weatherTemp != hm_lastTemp){
+    hm_lastTemp = weatherTemp;
+    // Clear weather area
+    gfx->fillRect(345, 150, 100, 160, C_BLACK);
+    drawWeatherIcon(395, 193);
+    // Temperature
+    if(weatherTemp > -99){
+      char wbuf[8]; snprintf(wbuf, sizeof(wbuf), "%d°", weatherTemp);
+      textC(wbuf, 395, 266, 3, C_WHITE);
+      if(weatherCond[0]) textC(weatherCond, 395, 298, 1, C_GREY);
+    }
+  }
+
+  // ---- BLINK ANIMATION ----
+  if(now >= nextBlink && !blinkActive && !petAnimOn){
+    // Start blink: show sleepy face briefly
+    blinkActive = true;
+    blitAvatar(EXPR_SLEEPY);
+    nextBlink = now + 150;   // blink lasts 150ms
+  }
+  if(blinkActive && now >= nextBlink){
+    // Blink done: restore expression
+    blinkActive = false;
+    Expression show = (exprOverrideEnd > now) ? curExpr : baseExpr;
+    if(show == EXPR_SLEEPY){
+      // Already sleepy, just keep it
+    } else {
+      blitAvatar(show);
+    }
+    nextBlink = now + 3000 + (esp_random() % 5000);  // next blink in 3-8s
+  }
+
+  // ---- EXPRESSION OVERRIDE TIMEOUT ----
+  if(exprOverrideEnd > 0 && now >= exprOverrideEnd){
+    exprOverrideEnd = 0;
+    baseExpr = autoExpression();
+    if(!blinkActive) blitAvatar(baseExpr);
+  }
+
+  // ---- UPDATE BASE EXPRESSION (check periodically) ----
+  static uint32_t lastExprCheck = 0;
+  if(now - lastExprCheck > 30000){   // every 30s
+    lastExprCheck = now;
+    Expression newBase = autoExpression();
+    if(pet.sleeping) newBase = EXPR_SLEEPY;
+    if(newBase != baseExpr && exprOverrideEnd == 0 && !blinkActive){
+      baseExpr = newBase;
+      blitAvatar(baseExpr);
+    }
   }
 }
 
 void handleHome(const UiEvent &ev) {
-  bool central = (ev.y>=44 && ev.y<=424);     // avatar area (not the HUD strips)
-  if (ev.type == EV_TAP && central) {         // tap = pet
-    pet.fun = clampi(pet.fun + 6, 0, 100);
-    reward(1, 3);
-    triggerPet(); saveState();
+  if(ev.type == EV_NONE) return;
+
+  // ---- TAP ZONES ----
+  if(ev.type == EV_TAP){
+    int tx = ev.x, ty = ev.y;
+
+    // Clock zone: circle centre (233, 64), radius 66
+    int cdx = tx - 233, cdy = ty - 64;
+    if(cdx*cdx + cdy*cdy < 66*66){
+      screen = SCR_CLOCK; screenDirty = true; return;
+    }
+
+    // Weather zone: rect x 326-466, y 126-306
+    if(tx >= 326 && tx <= 466 && ty >= 126 && ty <= 306){
+      // TODO: open weather detail screen
+      return;
+    }
+
+    // Battery zone: rect x 143-323, y 336-466
+    if(tx >= 143 && tx <= 323 && ty >= 336 && ty <= 466){
+      screen = SCR_BATTERY; screenDirty = true; return;
+    }
+
+    // Avatar zone: tap = pet reaction
+    if(tx >= ALON_X && tx <= ALON_X + ALON_IMG_W &&
+       ty >= ALON_Y && ty <= ALON_Y + ALON_IMG_H){
+      pet.fun = clampi(pet.fun + 6, 0, 100);
+      reward(1, 3);
+      triggerExpression(EXPR_HAPPY, 2000);
+      triggerPet(); saveState();
+      return;
+    }
   }
-  else if (ev.type == EV_HOLD && central) { screen = SCR_AGENT; screenDirty = true; }
-  else if (ev.type == EV_SWIPE_U || ev.type == EV_SWIPE_L || ev.type == EV_SWIPE_R) { screen = SCR_APPS; screenDirty = true; }
-  else if (ev.type == EV_SWIPE_D) { screen = SCR_SETTINGS; screenDirty = true; }
+
+  // Hold on avatar = agent mode
+  if(ev.type == EV_HOLD){
+    if(ev.x >= ALON_X && ev.x <= ALON_X + ALON_IMG_W &&
+       ev.y >= ALON_Y && ev.y <= ALON_Y + ALON_IMG_H){
+      screen = SCR_AGENT; screenDirty = true; return;
+    }
+  }
+
+  // Swipes
+  if(ev.type == EV_SWIPE_U || ev.type == EV_SWIPE_L || ev.type == EV_SWIPE_R){
+    screen = SCR_APPS; screenDirty = true;
+  }
+  else if(ev.type == EV_SWIPE_D){
+    screen = SCR_SETTINGS; screenDirty = true;
+  }
 }
 
 /* ------- shared BACK/HOME button for every sub-screen ------- */
@@ -770,6 +940,7 @@ bool hitBack(const UiEvent &ev){
 /* ===================================================================
    CARE SCREEN  (feed / clean / medicine)
    =================================================================== */
+struct Btn { int x, y, w, h; const char *label; };
 Btn careBtns[3] = {
   {133, 150, 200, 54, "FEED  (-5)"},
   {133, 218, 200, 54, "CLEAN (-3)"},
@@ -864,8 +1035,12 @@ void handleStats(const UiEvent &ev){
    =================================================================== */
 uint32_t agentAnim=0;
 void drawAgentStatic(){
-  blitFull(img_agent);                        // full-screen agent render (has its own aura)
-  gfx->fillRect(0, 0, 466, 28, C_BLACK);
+  gfx->fillScreen(C_BLACK);
+  blitAvatar(EXPR_NEUTRAL);
+  // Aura rings around the avatar
+  Theme &th=THEMES[pet.equipped];
+  int acx = ALON_X + ALON_IMG_W/2, acy = ALON_Y + ALON_IMG_H/2;
+  for(int i=0;i<3;i++) gfx->drawCircle(acx, acy, 80+i*12, th.accent);
   textC("AGENT  -  listening...", LCD_W/2, 13, 2, C_CYAN);
   drawBackBtn();
 }
@@ -1922,7 +2097,7 @@ void loop(){
 
   // per-screen animation / ticking
   switch(screen){
-    case SCR_HOME:  drawHomeDynamic(); animateAvatar(); break;
+    case SCR_HOME:  drawHomeDynamic(); animatePetReaction(); break;
     case SCR_LEVEL:   tickLevel();     break;
     case SCR_HORIZON: tickMarble();    break;
     case SCR_STEPS:   tickSteps();     break;
