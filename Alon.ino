@@ -73,7 +73,7 @@
 #define TP_RST      40
 #define TP_ADDR     0x5A
 // IMU (QMI8658)
-#define IMU_ADDR    0x6B
+#define IMU_ADDR    0x6A   // QMI8658 "L" address (Waveshare's own value; 0x6B was wrong)
 
 /* If taps land in the wrong place, flip these (then rebuild):          */
 #define TOUCH_FLIP_X 1
@@ -133,6 +133,22 @@ bool imuRead(){
   imu.getAccelerometer(accX,accY,accZ);   // accelerometer only (gyro unused)
   return true;
 }
+// Lazy, one-shot IMU bring-up. Called when a motion app opens - never at boot,
+// so a missing/slow chip can't hang startup (and OTA recovery stays possible).
+// Uses Waveshare's own init: address 0x6A, 4G range, 1kHz ODR.
+bool imuEnsure(){
+  static bool tried=false;
+  if(tried) return imuOK;
+  tried=true;
+  Wire.beginTransmission(IMU_ADDR);
+  if(Wire.endTransmission()!=0) return false;          // chip not answering
+  if(imu.begin(Wire, IMU_ADDR, IIC_SDA, IIC_SCL)){
+    imu.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_1000Hz, SensorQMI8658::LPF_MODE_0);
+    imu.enableAccelerometer();
+    imuOK=true;
+  }
+  return imuOK;
+}
 
 // --- Clock: ESP32-S3 INTERNAL RTC. This board has NO external RTC chip (the
 //     schematic shows a 32.768kHz crystal wired to the ESP32's XTAL_32K pins and
@@ -177,6 +193,7 @@ bool rtcInit(){
 #define C_GREEN     0x37E0
 #define C_YELLOW    0xFEE0   // LEGO head yellow
 #define C_ORANGE    0xFD20
+#define C_TILE      0x18A8   // dark slate tile fill for the neon UI
 
 // Accent themes (owned/equipped in the shop). Index 0 = default cyan/violet.
 struct Theme { const char *name; uint16_t accent; uint16_t head; uint32_t cost; };
@@ -694,8 +711,11 @@ void handleHome(const UiEvent &ev) {
 #define BK_W 150
 #define BK_H 38
 void drawBackBtn(){
-  gfx->fillRoundRect(BK_X,BK_Y,BK_W,BK_H,12,THEMES[pet.equipped].accent);
-  textC("HOME", BK_X+BK_W/2, BK_Y+BK_H/2, 2, C_BLACK);
+  uint16_t ac=THEMES[pet.equipped].accent;
+  gfx->fillRoundRect(BK_X,BK_Y,BK_W,BK_H,12,C_TILE);          // dark pill
+  gfx->drawRoundRect(BK_X,BK_Y,BK_W,BK_H,12,ac);             // glowing accent edge
+  gfx->drawRoundRect(BK_X+1,BK_Y+1,BK_W-2,BK_H-2,11,ac);
+  textC("HOME", BK_X+BK_W/2, BK_Y+BK_H/2, 2, ac);
 }
 bool hitBack(const UiEvent &ev){
   return ev.type==EV_DOWN && ev.x>=BK_X && ev.x<=BK_X+BK_W &&
@@ -1108,6 +1128,43 @@ int appPage = 0;
 
 void appTileXY(int i,int &x,int &y){ int c=i%3, r=i/3; x=24+c*144; y=100+r*100; }
 
+// Simple line-art app icons drawn from GFX primitives (accent-coloured).
+void drawAppIcon(const char* n, int cx, int cy, uint16_t c){
+  if(!strcmp(n,"Games")){
+    gfx->drawRoundRect(cx-16,cy-8,32,16,7,c);
+    gfx->drawLine(cx-9,cy-2,cx-9,cy+2,c); gfx->drawLine(cx-11,cy,cx-7,cy,c);
+    gfx->fillCircle(cx+8,cy-2,2,c); gfx->fillCircle(cx+12,cy+2,2,c);
+  } else if(!strcmp(n,"Leveler")){
+    gfx->drawCircle(cx,cy,14,c); gfx->drawLine(cx-14,cy,cx+14,cy,c); gfx->fillCircle(cx,cy,4,c);
+  } else if(!strcmp(n,"Marble")){
+    gfx->drawCircle(cx,cy,14,c); gfx->fillCircle(cx+4,cy-3,5,c);
+  } else if(!strcmp(n,"Steps")){
+    gfx->fillRoundRect(cx-11,cy-2,8,14,4,c); gfx->fillRoundRect(cx+3,cy-8,8,14,4,c);
+  } else if(!strcmp(n,"Clock")){
+    gfx->drawCircle(cx,cy,14,c); gfx->drawLine(cx,cy,cx,cy-9,c); gfx->drawLine(cx,cy,cx+7,cy+2,c);
+  } else if(!strcmp(n,"Stopwatch")){
+    gfx->drawCircle(cx,cy,13,c); gfx->drawLine(cx,cy-13,cx,cy-19,c); gfx->drawLine(cx,cy,cx,cy-8,c);
+  } else if(!strcmp(n,"Timer")){
+    gfx->drawLine(cx-10,cy-12,cx+10,cy-12,c); gfx->drawLine(cx+10,cy-12,cx,cy,c); gfx->drawLine(cx,cy,cx-10,cy-12,c);
+    gfx->drawLine(cx-10,cy+12,cx+10,cy+12,c); gfx->drawLine(cx+10,cy+12,cx,cy,c); gfx->drawLine(cx,cy,cx-10,cy+12,c);
+  } else if(!strcmp(n,"Battery")){
+    gfx->drawRoundRect(cx-16,cy-8,30,16,3,c); gfx->fillRect(cx+14,cy-3,3,6,c);
+    gfx->fillRoundRect(cx-13,cy-5,10,10,2,c);
+  } else if(!strcmp(n,"Light")){
+    gfx->fillCircle(cx,cy,6,c);
+    for(int a=0;a<360;a+=45){ float r=a*0.01745f;
+      gfx->drawLine(cx+(int)(11*cosf(r)),cy+(int)(11*sinf(r)),cx+(int)(16*cosf(r)),cy+(int)(16*sinf(r)),c); }
+  } else if(!strcmp(n,"WiFi")){
+    for(int rr=6;rr<=16;rr+=5) for(int a=210;a<=330;a+=7){ float r=a*0.01745f;
+      gfx->fillCircle(cx+(int)(rr*cosf(r)),cy+8+(int)(rr*sinf(r)),1,c); }
+    gfx->fillCircle(cx,cy+8,2,c);
+  } else if(!strcmp(n,"System")){
+    gfx->drawCircle(cx,cy,12,c); gfx->fillCircle(cx,cy,3,c);
+    for(int a=0;a<360;a+=45){ float r=a*0.01745f;
+      gfx->drawLine(cx+(int)(12*cosf(r)),cy+(int)(12*sinf(r)),cx+(int)(16*cosf(r)),cy+(int)(16*sinf(r)),c); }
+  } else { gfx->drawCircle(cx,cy,12,c); }
+}
+
 void drawApps(){
   gfx->fillScreen(C_BLACK);
   textC("APPS", 233, 40, 3, THEMES[pet.equipped].accent);
@@ -1115,13 +1172,16 @@ void drawApps(){
   for(int i=0;i<APPS_PER_PAGE;i++){
     int idx=start+i; if(idx>=APP_COUNT) break;
     int x,y; appTileXY(i,x,y);
-    gfx->fillRoundRect(x,y,130,88,16,0x4A69);   // clean flat tile, no outline
-    textC(APPS[idx].name, x+65, y+44, 2, C_WHITE);
+    uint16_t ac = (idx%2==0) ? C_CYAN : C_VIOLET;
+    gfx->fillRoundRect(x,y,130,88,16,C_TILE);                 // dark tile
+    gfx->drawRoundRect(x,y,130,88,16,ac);                     // glowing accent border
+    gfx->drawRoundRect(x+1,y+1,128,86,15,ac);
+    drawAppIcon(APPS[idx].name, x+65, y+30, ac);
+    textC(APPS[idx].name, x+65, y+68, 2, C_WHITE);
   }
   int pages=(APP_COUNT+APPS_PER_PAGE-1)/APPS_PER_PAGE;
   for(int p=0;p<pages;p++)
-    gfx->fillCircle(233-(pages-1)*9+p*18, 312, 4, p==appPage?THEMES[pet.equipped].accent:C_DIMGREY);
-  textC("swipe L/R: pages", 233, 334, 1, C_GREY);
+    gfx->fillCircle(233-(pages-1)*9+p*18, 322, 4, p==appPage?THEMES[pet.equipped].accent:C_DIMGREY);
   drawBackBtn();
 }
 void handleApps(const UiEvent &ev){
@@ -1244,7 +1304,7 @@ void tickWifi(){
 }
 
 /* ---------------- LEVELER (bubble level, uses accelerometer) ------ */
-void drawLevelStatic(){ appHeader("LEVELER"); drawBackBtn(); }
+void drawLevelStatic(){ imuEnsure(); appHeader("LEVELER"); drawBackBtn(); }
 void tickLevel(){
   static int px=233,py=210; static uint32_t last=0;
   if(millis()-last<45) return; last=millis();
@@ -1267,7 +1327,7 @@ void handleLevel(const UiEvent &ev){ appBack(ev); }
 
 /* ---------------- MARBLE (tilt a ball around a bowl) -------------- */
 float mbx=233,mby=233,mvx=0,mvy=0;
-void drawMarbleStatic(){ appHeader("MARBLE"); gfx->drawCircle(233,236,150,C_DIMGREY); mbx=mby=233; mvx=mvy=0; drawBackBtn(); }
+void drawMarbleStatic(){ imuEnsure(); appHeader("MARBLE"); gfx->drawCircle(233,236,150,C_DIMGREY); mbx=mby=233; mvx=mvy=0; drawBackBtn(); }
 void tickMarble(){
   static uint32_t last=0; if(millis()-last<33) return; last=millis();
   if(!imuOK){ textC("IMU not available",233,236,2,C_RED); return; }
@@ -1284,7 +1344,7 @@ void handleMarble(const UiEvent &ev){ if(appBack(ev)) return; if(ev.type==EV_HOL
 
 /* ---------------- STEP COUNTER (accel peak detect) --------------- */
 long stepCount=0;
-void drawStepsStatic(){ appHeader("STEPS"); gfx->fillRoundRect(133,300,200,40,10,C_DIMGREY); textC("RESET",233,320,2,C_WHITE); drawBackBtn(); }
+void drawStepsStatic(){ imuEnsure(); appHeader("STEPS"); gfx->fillRoundRect(133,300,200,40,10,C_DIMGREY); textC("RESET",233,320,2,C_WHITE); drawBackBtn(); }
 void tickSteps(){
   if(imuOK && imuRead()){
     float mag=sqrtf(accX*accX+accY*accY+accZ*accZ);
@@ -1461,8 +1521,9 @@ void setup(){
   // NOTE: the SensorLib QMI8658 init blocks on this unit (hangs boot), so it
   // is disabled here to guarantee a clean boot. Sensor apps show "IMU not
   // available" until we bring it up through a non-blocking path.
-  imuOK = false;
-  (void)imuProbe; (void)imu;
+  // IMU (QMI8658) starts lazily when a motion app opens (correct addr 0x6A),
+  // so a missing/slow chip can never stall boot.
+  (void)imuProbe;
 
   // ---- Real-time clock (PCF85063): start the oscillator so it actually ticks ----
   rtcOK = rtcInit();
