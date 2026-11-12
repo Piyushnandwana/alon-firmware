@@ -564,6 +564,11 @@ void reward(uint32_t studs, uint32_t xp) { pet.studs += studs; addXP(xp); }
 enum Expression : uint8_t { EXPR_NEUTRAL=0, EXPR_HAPPY=1, EXPR_SLEEPY=2, EXPR_SAD=3 };
 const uint16_t* EXPR_IMGS[4] = { img_neutral, img_happy, img_sleepy, img_sad };
 
+// Forward declarations (Arduino auto-prototype can't handle Expression type)
+void blitAvatar(Expression e);
+Expression autoExpression();
+void triggerExpression(Expression e, uint32_t durationMs);
+
 Expression  curExpr     = EXPR_NEUTRAL;    // current displayed expression
 Expression  baseExpr    = EXPR_NEUTRAL;    // expression when not doing a blink/reaction
 uint32_t    exprOverrideEnd = 0;           // millis when a temporary expression reverts
