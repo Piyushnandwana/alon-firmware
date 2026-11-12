@@ -630,6 +630,11 @@ void drawStatBar(int idx, const char *label, int val, int x, int y, int w) {
   gfx->setCursor(x, y - 11); gfx->print(label);
 }
 
+// Cached values to avoid redrawing unchanged home zones (file scope so multiple functions can reset them)
+int  hm_lastHH = -2, hm_lastMM = -2, hm_lastBat = -2;
+int  hm_lastTemp = -999;
+bool hm_lastCharging = false;
+
 /* ===================================================================
    PET REACTION ANIMATION  (sparkles + hearts over avatar zone)
    =================================================================== */
@@ -656,17 +661,40 @@ void triggerPet(){
 void animatePetReaction(){
   if(!petAnimOn) return;
   uint32_t now=millis(); int age=now-petAnimStart;
-  if(age>=PET_MS){ petAnimOn=false; blitAvatar(curExpr); return; }
+  if(age>=PET_MS){
+    petAnimOn=false;
+    // Clean up: re-blit avatar and clear any stray particles around it
+    blitAvatar(curExpr);
+    // Clear above avatar (where hearts float)
+    gfx->fillRect(ALON_X-35, ALON_Y-50, ALON_IMG_W+70, 50, C_BLACK);
+    // Clear sides of avatar (where sparks fly)
+    gfx->fillRect(ALON_X-35, ALON_Y, 35, ALON_IMG_H, C_BLACK);
+    gfx->fillRect(ALON_X+ALON_IMG_W, ALON_Y, 35, ALON_IMG_H, C_BLACK);
+    // Force clock/battery to redraw since animation blocked them
+    hm_lastHH = -2; hm_lastMM = -2; hm_lastBat = -2;
+    return;
+  }
   if(now-lastPetFrame<40) return; lastPetFrame=now;
-  blitAvatar(EXPR_HAPPY);     // re-blit clears last frame's particles
+  blitAvatar(EXPR_HAPPY);     // re-blit clears particles inside avatar rect
+  // Clear area around avatar where particles may have drawn
+  gfx->fillRect(ALON_X-35, ALON_Y-50, ALON_IMG_W+70, 50, C_BLACK);
+  gfx->fillRect(ALON_X-35, ALON_Y, 35, ALON_IMG_H, C_BLACK);
+  gfx->fillRect(ALON_X+ALON_IMG_W, ALON_Y, 35, ALON_IMG_H, C_BLACK);
+  // Draw particles — keep them near the avatar zone
   for(int i=0;i<18;i++){
     sparks[i].x+=sparks[i].vx; sparks[i].y+=sparks[i].vy; sparks[i].vy+=0.18f;
     int sx=(int)sparks[i].x, sy=(int)sparks[i].y;
-    if(sx>3&&sx<463&&sy>3&&sy<463) gfx->fillCircle(sx,sy,3,sparks[i].col);
+    // Constrain to area around avatar (don't overwrite clock or battery zones)
+    if(sx>(ALON_X-30) && sx<(ALON_X+ALON_IMG_W+30) &&
+       sy>(ALON_Y-40) && sy<(ALON_Y+ALON_IMG_H+20))
+      gfx->fillCircle(sx,sy,3,sparks[i].col);
   }
   int acx = ALON_X + ALON_IMG_W/2;
   int hy = (ALON_Y + ALON_IMG_H/2) - age*70/PET_MS;
-  drawHeartAt(acx-28,hy,0xF81F); drawHeartAt(acx+29,hy-14,C_RED);
+  // Keep hearts within avatar area
+  if(hy > ALON_Y - 40){
+    drawHeartAt(acx-28,hy,0xF81F); drawHeartAt(acx+29,hy-14,C_RED);
+  }
 }
 
 /* ===================================================================
@@ -751,17 +779,12 @@ void drawHomeStatic() {
   // Init blink timer
   nextBlink = millis() + 3000 + (esp_random() % 5000);  // 3-8 sec
 
-  // Force all zones to draw on first frame
-  // (drawHomeDynamic will handle clock, weather, battery)
+  // Reset cached values so drawHomeDynamic redraws ALL zones on first call
+  hm_lastHH = -2; hm_lastMM = -2; hm_lastBat = -2;
+  hm_lastTemp = -999; hm_lastCharging = false;
 }
 
-// Cached values to avoid redrawing unchanged zones
-static int  hm_lastHH = -2, hm_lastMM = -2, hm_lastBat = -2;
-static int  hm_lastTemp = -999;
-static bool hm_lastCharging = false;
-
 void drawHomeDynamic() {
-  if(petAnimOn) return;    // sparkle animation is running
   uint32_t now = millis();
 
   // ---- CLOCK ZONE (top centre) ----
