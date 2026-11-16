@@ -850,9 +850,9 @@ void drawHomeDynamic() {
     hm_lastTemp = weatherTemp;
     // Clear weather area
     gfx->fillRect(345, 150, 100, 160, C_BLACK);
-    drawWeatherIcon(395, 193);
-    // Temperature
+    // No weather data yet -> leave the zone empty (no placeholder sun)
     if(weatherTemp > -99){
+      drawWeatherIcon(395, 193);
       char wbuf[8]; snprintf(wbuf, sizeof(wbuf), "%d°", weatherTemp);
       textC(wbuf, 395, 266, 3, C_WHITE);
       if(weatherCond[0]) textC(weatherCond, 395, 298, 1, C_GREY);
@@ -1779,28 +1779,58 @@ void tickWifi(){
   if((int)wifiConnected()!=last){ last=(int)wifiConnected(); screenDirty=true; }
 }
 
-/* ---------------- LEVELER (bubble level, uses accelerometer) ------ */
+/* ---- off-screen tile helpers ------------------------------------------
+   The CO5300 AMOLED drops odd-aligned 1px draws, which is why animated
+   shapes left horizontal stripes / traces. Animated areas are rendered in
+   RAM and pushed as ONE even-aligned bitmap instead (x,y,w,h all even). */
+struct Tile { uint16_t *px; int x, y, w, h; };
+static bool tileAlloc(Tile &t){
+  if(t.px) return true;
+  t.px = (uint16_t*)ps_malloc((size_t)t.w * t.h * 2);
+  if(!t.px) t.px = (uint16_t*)malloc((size_t)t.w * t.h * 2);
+  return t.px != nullptr;
+}
+static void tileClear(Tile &t, uint16_t c){ for(int i=0;i<t.w*t.h;i++) t.px[i]=c; }
+static inline void tilePut(Tile &t, int x, int y, uint16_t c){
+  x -= t.x; y -= t.y;
+  if(x>=0 && y>=0 && x<t.w && y<t.h) t.px[y*t.w+x] = c;
+}
+static void tileDisc(Tile &t, int cx, int cy, int r, uint16_t c){
+  for(int y=-r;y<=r;y++) for(int x=-r;x<=r;x++) if(x*x+y*y<=r*r) tilePut(t,cx+x,cy+y,c);
+}
+static void tileRing(Tile &t, int cx, int cy, int r, uint16_t c){
+  int lo=r*r-r, hi=r*r+r;
+  for(int y=0;y<t.h;y++){
+    int dy=t.y+y-cy;
+    for(int x=0;x<t.w;x++){
+      int dx=t.x+x-cx, d2=dx*dx+dy*dy;
+      if(d2>=lo && d2<=hi) t.px[y*t.w+x]=c;
+    }
+  }
+}
+static void tilePush(Tile &t){ gfx->draw16bitRGBBitmap(t.x, t.y, t.px, t.w, t.h); }
+
+/* ---------------- LEVELER (bubble level) --------------------------- */
+static Tile lvT = { nullptr, 108, 86, 250, 248 };
 void drawLevelStatic(){ imuEnsure(); appHeader("LEVELER"); drawBackBtn(); }
 void tickLevel(){
   static uint32_t last=0;
   if(millis()-last<50) return; last=millis();
   if(!imuOK){ textC("IMU not available",233,210,2,C_RED); return; }
   if(!imuRead()) return;
-  // Clear the entire play area each frame to prevent ghost trails
-  gfx->fillCircle(233,210,136,C_BLACK);
-  // Draw reference circles
-  gfx->drawCircle(233,210,120,C_DIMGREY);
-  gfx->drawCircle(233,210,60,C_DIMGREY);
-  gfx->drawCircle(233,210,30,C_GREEN);
-  // Draw crosshair
-  gfx->drawFastHLine(113,210,240,C_DIMGREY);
-  gfx->fillRect(233,90,1,240,C_DIMGREY);   // vertical crosshair
-  // Calculate bubble position
+  if(!tileAlloc(lvT)) return;
+  tileClear(lvT, C_BLACK);
+  tileRing(lvT,233,210,120,C_DIMGREY);
+  tileRing(lvT,233,210,60,C_DIMGREY);
+  tileRing(lvT,233,210,30,C_GREEN);
+  for(int x=113;x<=353;x++) tilePut(lvT,x,210,C_DIMGREY);   // crosshair
+  for(int y=90;y<=330;y++)  tilePut(lvT,233,y,C_DIMGREY);
   int bx=233-(int)(accX*120), by=210+(int)(accY*120);
   float dx=bx-233, dy=by-210, d=sqrtf(dx*dx+dy*dy);
   if(d>104){ bx=233+(int)(dx*104/d); by=210+(int)(dy*104/d); }
   bool level=(abs(bx-233)<16 && abs(by-210)<16);
-  gfx->fillCircle(bx,by,14, level?C_GREEN:C_CYAN);
+  tileDisc(lvT,bx,by,14, level?C_GREEN:C_CYAN);
+  tilePush(lvT);
   // Degree readout
   gfx->fillRect(120,340,226,26,C_BLACK);
   char b[28]; snprintf(b,sizeof(b),"%d, %d deg",(int)(accX*90),(int)(accY*90));
@@ -1810,18 +1840,30 @@ void handleLevel(const UiEvent &ev){ appBack(ev); }
 
 /* ---------------- MARBLE (tilt a ball around a bowl) -------------- */
 float mbx=233,mby=233,mvx=0,mvy=0;
-void drawMarbleStatic(){ imuEnsure(); appHeader("MARBLE"); gfx->drawCircle(233,236,150,C_DIMGREY); mbx=mby=233; mvx=mvy=0; drawBackBtn(); }
+static Tile mbT = { nullptr, 0, 0, 56, 56 };
+static int mbLastX=-1, mbLastY=-1;
+static void mbRender(int ox, int oy){
+  mbT.x=ox; mbT.y=oy;
+  tileClear(mbT, C_BLACK);
+  tileRing(mbT,233,236,150,C_DIMGREY);
+  tileDisc(mbT,(int)mbx,(int)mby,12,THEMES[pet.equipped].accent);
+  tilePush(mbT);
+}
+void drawMarbleStatic(){ imuEnsure(); appHeader("MARBLE"); gfx->drawCircle(233,236,150,C_DIMGREY); mbx=mby=233; mvx=mvy=0; mbLastX=-1; drawBackBtn(); }
 void tickMarble(){
   static uint32_t last=0; if(millis()-last<33) return; last=millis();
   if(!imuOK){ textC("IMU not available",233,236,2,C_RED); return; }
   if(!imuRead()) return;
-  gfx->fillCircle((int)mbx,(int)mby,12,C_BLACK);
+  if(!tileAlloc(mbT)) return;
   mvx += accX*1.6f; mvy -= accY*1.6f; mvx*=0.93f; mvy*=0.93f;
   mbx += mvx*0.12f; mby += mvy*0.12f;
   float dx=mbx-233, dy=mby-236, d=sqrtf(dx*dx+dy*dy);
   if(d>138){ mbx=233+dx*138/d; mby=236+dy*138/d; mvx*=-0.5f; mvy*=-0.5f; }
-  gfx->drawCircle(233,236,150,C_DIMGREY);
-  gfx->fillCircle((int)mbx,(int)mby,12,THEMES[pet.equipped].accent);
+  int nx=((int)mbx-28)&~1, ny=((int)mby-28)&~1;     // even-aligned tile origin
+  if(mbLastX>=0 && (mbLastX!=nx || mbLastY!=ny)) mbRender(mbLastX, mbLastY);  // erase old ball
+  mbRender(nx, ny);
+  mbLastX=nx; mbLastY=ny;
+  if(mby>290) drawBackBtn();       // ball may pass over the HOME button
 }
 void handleMarble(const UiEvent &ev){ if(appBack(ev)) return; if(ev.type==EV_HOLD){ mbx=mby=233; mvx=mvy=0; } }
 
