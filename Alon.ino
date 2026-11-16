@@ -54,6 +54,9 @@
 #include "SensorPCF85063.hpp"   // onboard real-time clock
 #include "img_alon.h"           // real LEGO avatar images (idle/sleep/agent/celebration)
 
+// Off-screen tile type (must precede all functions: Arduino auto-prototypes are hoisted above later types)
+struct Tile { uint16_t *px; int x, y, w, h; };
+
 /* ----------------------- BOARD PIN MAP ------------------------------ */
 // Display (CO5300 QSPI)
 #define LCD_SDIO0   4
@@ -1783,7 +1786,6 @@ void tickWifi(){
    The CO5300 AMOLED drops odd-aligned 1px draws, which is why animated
    shapes left horizontal stripes / traces. Animated areas are rendered in
    RAM and pushed as ONE even-aligned bitmap instead (x,y,w,h all even). */
-struct Tile { uint16_t *px; int x, y, w, h; };
 static bool tileAlloc(Tile &t){
   if(t.px) return true;
   t.px = (uint16_t*)ps_malloc((size_t)t.w * t.h * 2);
