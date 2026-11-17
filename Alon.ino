@@ -1857,8 +1857,8 @@ void tickMarble(){
   if(!imuOK){ textC("IMU not available",233,236,2,C_RED); return; }
   if(!imuRead()) return;
   if(!tileAlloc(mbT)) return;
-  mvx += accX*1.6f; mvy -= accY*1.6f; mvx*=0.93f; mvy*=0.93f;
-  mbx += mvx*0.12f; mby += mvy*0.12f;
+  mvx += accX*3.5f; mvy -= accY*3.5f; mvx*=0.93f; mvy*=0.93f;
+  mbx += mvx*0.18f; mby += mvy*0.18f;
   float dx=mbx-233, dy=mby-236, d=sqrtf(dx*dx+dy*dy);
   if(d>138){ mbx=233+dx*138/d; mby=236+dy*138/d; mvx*=-0.5f; mvy*=-0.5f; }
   int nx=((int)mbx-28)&~1, ny=((int)mby-28)&~1;     // even-aligned tile origin
